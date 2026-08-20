@@ -226,6 +226,12 @@ export const openrouter: Recipe = {
         'qwen/qwen3-embedding-8b': 4096,
         'bge-m3': 1024,
         'baai/bge-m3': 1024,
+        // VoyageAI via OpenRouter (added to OR 2026-07-27). All three default
+        // to 1024 despite Matryoshka support for 2048/512/256 — probed against
+        // the live endpoint, not inferred from the model card.
+        'voyageai/voyage-4': 1024,
+        'voyageai/voyage-4-large': 1024,
+        'voyageai/voyage-4-lite': 1024,
       },
       // OpenRouter proxies arbitrary embedding models with widths we cannot
       // know ahead of time; 0 = no silent default for unlisted ids.
@@ -286,6 +292,11 @@ export const openrouter: Recipe = {
         'cohere/rerank-4-fast',
         'cohere/rerank-4-pro',
         'nvidia/llama-nemotron-rerank-vl-1b-v2:free',
+        // VoyageAI rerankers. OR serves these at /api/v1/rerank returning the
+        // same {results:[{index,relevance_score}]} shape gateway.rerank()
+        // already parses; the only thing blocking them was this allowlist.
+        'voyageai/rerank-2.5',
+        'voyageai/rerank-2.5-lite',
       ],
       default_model: 'cohere/rerank-v3.5',
       // Cohere bills per-search, not per-token. This is a pseudo-per-1M rate
