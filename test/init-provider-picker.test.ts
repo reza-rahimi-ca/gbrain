@@ -64,6 +64,28 @@ describe('pickProvider — defensive paths', () => {
     }
   });
 
+  test('OPENROUTER_API_KEY-only TTY pick → openrouter:voyageai/voyage-4 @ 1024 (per-model dims, not the recipe\'s default_dims: 0)', async () => {
+    let stderr = '';
+    const got = await pickProvider({
+      touchpoint: 'embedding',
+      env: { OPENROUTER_API_KEY: 'sk-or-test' },
+      isTTY: true,
+      writeStderr: (s) => { stderr += s; },
+      probeLocal: async () => ({ reachable: false }),
+    });
+    expect(got).not.toBeNull();
+    if (got) {
+      expect(got.recipeId).toBe('openrouter');
+      expect(got.fullModel).toBe('openrouter:voyageai/voyage-4');
+      // Pre-fix the picker returned the recipe-wide `default_dims` (0 for
+      // OpenRouter's mixed-width catalog) and init would have sized the
+      // schema at 0. The width must come from `model_dims[default_model]`.
+      expect(got.dim).toBe(1024);
+      // The displayed row matches what the pick selects — width AND model.
+      expect(stderr).toContain('openrouter  (1024d)  voyageai/voyage-4');
+    }
+  });
+
   test('keyless machine (no keys, ollama daemon down) → keyless default, returns null', async () => {
     let stderr = '';
     const got = await pickProvider({
