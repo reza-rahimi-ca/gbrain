@@ -635,6 +635,19 @@ export interface ResolveSearchModeInput {
   overrides?: SearchKeyOverrides;
   /** Per-call opts (SearchOpts / HybridSearchOpts). */
   perCall?: SearchPerCallOpts;
+  /**
+   * Key-aware value for the bundle's `reranker_model` slot. Sits BELOW the
+   * per-call and config-override planes and ABOVE the static bundle constant.
+   * Supplied by `loadSearchModeConfig` from
+   * `resolveDefaultRerankerModelForEngine` (ai/reranker-readiness-engine.ts —
+   * the same env plane doctor, `gbrain search modes` and init read), and ONLY
+   * when a key-aware alternate actually won (an OPENROUTER_API_KEY-only brain
+   * → `openrouter:voyageai/rerank-2.5`). Undefined → the static bundle value
+   * (`DEFAULT_RERANKER_MODEL`), so a Voyage-keyed or keyless brain — and every
+   * caller that does not thread it — keeps today's behavior byte-for-byte.
+   * `resolveSearchMode` stays pure: the env read happens in the loader.
+   */
+  defaultRerankerModel?: string;
 }
 
 export interface ResolvedSearchKnobs extends ModeBundle {
@@ -665,7 +678,16 @@ export function resolveSearchMode(input: ResolveSearchModeInput): ResolvedSearch
   // their cold-start headroom without forcing users to discover the
   // `search.reranker.timeout_ms` config key.
   // Precedence: per-call > config override > recipe.touchpoints.reranker.default_timeout_ms > mode bundle.
-  const resolvedRerankerModel = pick('reranker_model');
+  //
+  // `reranker_model` alone has a fourth rung between override and bundle: the
+  // key-aware default the loader computed (see ResolveSearchModeInput). The
+  // bundle constant is still the floor, so nothing changes when it is absent.
+  const resolvedRerankerModel: string =
+    pc.reranker_model !== undefined
+      ? pc.reranker_model
+      : ov.reranker_model !== undefined
+        ? ov.reranker_model
+        : (input.defaultRerankerModel ?? bundle.reranker_model);
   const pickRerankerTimeoutMs = (): number => {
     if (pc.reranker_timeout_ms !== undefined) return pc.reranker_timeout_ms;
     if (ov.reranker_timeout_ms !== undefined) return ov.reranker_timeout_ms;
@@ -745,6 +767,26 @@ export function attributeKnob<K extends keyof ModeBundle>(
   }
   if (ov[knob] !== undefined) {
     return { knob, value: resolved[knob], source: 'override', source_detail: `config: search.${knob}` };
+  }
+  // Key-aware bundle default (reranker_model only): still the MODE plane —
+  // no config row exists — but the dashboard must say why the value differs
+  // from the printed bundle constant, or `gbrain search modes` reads as drift.
+  if (
+    knob === 'reranker_model' &&
+    input.defaultRerankerModel !== undefined &&
+    input.defaultRerankerModel !== MODE_BUNDLES[resolved.resolved_mode].reranker_model
+  ) {
+    const modeLabel = resolved.mode_valid
+      ? `mode: ${resolved.resolved_mode}`
+      : `mode: ${DEFAULT_SEARCH_MODE} (default — search.mode unset)`;
+    return {
+      knob,
+      value: resolved[knob],
+      source: 'mode',
+      source_detail:
+        `${modeLabel}; key-aware default — ${MODE_BUNDLES[resolved.resolved_mode].reranker_model} ` +
+        `has no key here, so the bundle routes through the provider key that is present`,
+    };
   }
   if (resolved.mode_valid) {
     return { knob, value: resolved[knob], source: 'mode', source_detail: `mode: ${resolved.resolved_mode}` };
@@ -1520,9 +1562,26 @@ export async function loadSearchModeConfig(
     if (overrideValues[i] !== undefined) configMap[key] = overrideValues[i];
   });
 
+  // Key-aware bundle default for `reranker_model` (see ResolveSearchModeInput).
+  // Lazy import: the engine-plane resolver reaches the gateway module, which
+  // this leaf must not eager-load (mode.ts is imported by ~20 modules, several
+  // of them before any gateway exists). Threaded ONLY when an alternate won,
+  // so the static bundle stays the value for Voyage-keyed and keyless brains.
+  // Fail-open: any error → static bundle (a readiness bug must never take
+  // search down).
+  let defaultRerankerModel: string | undefined;
+  try {
+    const { resolveDefaultRerankerModelForEngine } = await import('../ai/reranker-readiness-engine.ts');
+    const r = await resolveDefaultRerankerModelForEngine(engine);
+    if (r.keyAware) defaultRerankerModel = r.model;
+  } catch {
+    defaultRerankerModel = undefined;
+  }
+
   return {
     mode,
     overrides: loadOverridesFromConfig(configMap),
+    ...(defaultRerankerModel !== undefined ? { defaultRerankerModel } : {}),
   };
 }
 

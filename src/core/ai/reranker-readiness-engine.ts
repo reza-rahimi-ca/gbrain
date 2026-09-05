@@ -1,7 +1,8 @@
 /**
  * Engine-plane wrapper around the pure `rerankerReadiness` leaf — the ONE place
- * doctor (`reranker_health`) and `gbrain search modes` build the env snapshot,
- * so the two surfaces cannot drift apart.
+ * doctor (`reranker_health`), `gbrain search modes`, and `loadSearchModeConfig`
+ * (the key-aware bundle default every search resolves through) build the env
+ * snapshot, so the surfaces cannot drift apart.
  *
  * Plane precedence: when the gateway is configured (every CLI command after
  * connectEngine), use ITS env + base_urls — that is exactly what `rerank()`
@@ -18,25 +19,32 @@ import { loadConfig, loadConfigWithEngine, type GBrainConfig } from '../config.t
 import type { DbPlaneEngineReader } from '../config-db-merge.ts';
 import { mergedProviderEnv } from './provider-env.ts';
 import { requireConfig } from './gateway.ts';
-import { rerankerReadiness, type RerankerReadiness } from './reranker-readiness.ts';
+import {
+  rerankerReadiness,
+  resolveDefaultRerankerModel,
+  type DefaultRerankerResolution,
+  type RerankerReadiness,
+} from './reranker-readiness.ts';
+
+export type ReadinessPlane = 'gateway' | 'config';
 
 export interface EngineReadiness {
   readiness: RerankerReadiness;
   /** Which plane answered: the live gateway snapshot, or the file+DB merge. */
-  plane: 'gateway' | 'config';
+  plane: ReadinessPlane;
 }
 
-export async function rerankerReadinessForEngine(
-  engine: DbPlaneEngineReader,
-  model: string,
-  opts: { now?: Date } = {},
-): Promise<EngineReadiness> {
+interface EnvPlane {
+  env: Record<string, string | undefined>;
+  baseUrlOverrides: Record<string, string | undefined> | null;
+  plane: ReadinessPlane;
+}
+
+/** The env + base-URL plane the CLI hands `rerank()` — gateway first, config fallback. */
+async function envPlaneForEngine(engine: DbPlaneEngineReader): Promise<EnvPlane> {
   try {
     const gw = requireConfig();
-    return {
-      plane: 'gateway',
-      readiness: rerankerReadiness(model, gw.env ?? {}, { now: opts.now, baseUrlOverrides: gw.base_urls ?? null }),
-    };
+    return { env: gw.env ?? {}, baseUrlOverrides: gw.base_urls ?? null, plane: 'gateway' };
   } catch {
     // Gateway not configured — build the plane the CLI would.
   }
@@ -45,10 +53,38 @@ export async function rerankerReadinessForEngine(
   let mergedCfg: GBrainConfig | null = fileCfg;
   try { mergedCfg = await loadConfigWithEngine(engine, fileCfg); } catch { mergedCfg = fileCfg; }
   return {
+    env: mergedProviderEnv(mergedCfg, process.env),
+    baseUrlOverrides: mergedCfg?.provider_base_urls ?? null,
     plane: 'config',
-    readiness: rerankerReadiness(model, mergedProviderEnv(mergedCfg, process.env), {
-      now: opts.now,
-      baseUrlOverrides: mergedCfg?.provider_base_urls ?? null,
-    }),
+  };
+}
+
+export async function rerankerReadinessForEngine(
+  engine: DbPlaneEngineReader,
+  model: string,
+  opts: { now?: Date } = {},
+): Promise<EngineReadiness> {
+  const p = await envPlaneForEngine(engine);
+  return {
+    plane: p.plane,
+    readiness: rerankerReadiness(model, p.env, { now: opts.now, baseUrlOverrides: p.baseUrlOverrides }),
+  };
+}
+
+/**
+ * Key-aware bundle default for `reranker_model` on the engine plane — what a
+ * brain with no `search.reranker.model` row actually reranks with. Same env
+ * plane as `rerankerReadinessForEngine`, so `loadSearchModeConfig`, doctor and
+ * `gbrain search modes` answer identically. See `resolveDefaultRerankerModel`
+ * for the precedence table.
+ */
+export async function resolveDefaultRerankerModelForEngine(
+  engine: DbPlaneEngineReader,
+  opts: { now?: Date } = {},
+): Promise<DefaultRerankerResolution & { plane: ReadinessPlane }> {
+  const p = await envPlaneForEngine(engine);
+  return {
+    plane: p.plane,
+    ...resolveDefaultRerankerModel(p.env, { now: opts.now, baseUrlOverrides: p.baseUrlOverrides }),
   };
 }

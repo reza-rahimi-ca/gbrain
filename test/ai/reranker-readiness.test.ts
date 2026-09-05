@@ -13,11 +13,17 @@
  *    env × model matrix — the drift guard between the two predicates.
  */
 import { afterAll, describe, expect, test } from 'bun:test';
-import { rerankerReadiness, describeRerankerFix } from '../../src/core/ai/reranker-readiness.ts';
+import {
+  rerankerReadiness,
+  describeRerankerFix,
+  resolveDefaultRerankerModel,
+  DEFAULT_RERANKER_CANDIDATES,
+} from '../../src/core/ai/reranker-readiness.ts';
 import {
   DEFAULT_RERANKER_MODEL,
   LEGACY_DEFAULT_RERANKER_MODEL,
   NEW_INSTALL_DEFAULT_RERANKER_MODEL,
+  OPENROUTER_DEFAULT_RERANKER_MODEL,
   ZEROENTROPY_SUNSET_DATE,
 } from '../../src/core/ai/defaults.ts';
 import { configureGateway, resetGateway, isAvailable } from '../../src/core/ai/gateway.ts';
@@ -193,5 +199,69 @@ describe('rerankerReadiness agrees with gateway isAvailable("reranker", model)',
         expect(isAvailable('reranker', m)).toBe(r.recipeKnown && r.hasTouchpoint && r.keyPresent);
       }
     }
+  });
+});
+
+describe('resolveDefaultRerankerModel — key-aware bundle default (one predicate for init / search / doctor / modes)', () => {
+  test('VOYAGE_API_KEY present → native default, not key-aware (zero change for keyed installs)', () => {
+    const r = resolveDefaultRerankerModel({ VOYAGE_API_KEY: 'pa-test' }, { now: BEFORE });
+    expect(r.model).toBe(DEFAULT_RERANKER_MODEL);
+    expect(r.keyAware).toBe(false);
+    expect(r.readiness.ready).toBe(true);
+    expect(r.readiness.requiredKey).toBe('VOYAGE_API_KEY');
+  });
+
+  test('only OPENROUTER_API_KEY → openrouter:voyageai/rerank-2.5, key-aware, ready', () => {
+    const r = resolveDefaultRerankerModel({ OPENROUTER_API_KEY: 'sk-or-test' }, { now: BEFORE });
+    expect(r.model).toBe(OPENROUTER_DEFAULT_RERANKER_MODEL);
+    expect(r.model).toBe('openrouter:voyageai/rerank-2.5');
+    expect(r.keyAware).toBe(true);
+    expect(r.readiness.ready).toBe(true);
+    expect(r.readiness.provider).toBe('openrouter');
+    expect(r.readiness.modelId).toBe('voyageai/rerank-2.5');
+    expect(r.readiness.requiredKey).toBe('OPENROUTER_API_KEY');
+    expect(describeRerankerFix(r.readiness)).toBeNull();
+  });
+
+  test('precedence: VOYAGE + OPENROUTER both present → native Voyage wins (OpenRouter never beats a native key)', () => {
+    const r = resolveDefaultRerankerModel({ VOYAGE_API_KEY: 'pa', OPENROUTER_API_KEY: 'sk-or' }, { now: BEFORE });
+    expect(r.model).toBe(DEFAULT_RERANKER_MODEL);
+    expect(r.keyAware).toBe(false);
+  });
+
+  test('no keys → native default, NOT ready (fail-open no_key at search time, unchanged); fix names the OpenRouter alternate', () => {
+    const r = resolveDefaultRerankerModel({}, { now: BEFORE });
+    expect(r.model).toBe(DEFAULT_RERANKER_MODEL);
+    expect(r.keyAware).toBe(false);
+    expect(r.readiness.ready).toBe(false);
+    expect(r.readiness.requiredKey).toBe('VOYAGE_API_KEY');
+    const fix = describeRerankerFix(r.readiness)!;
+    expect(fix).toContain('VOYAGE_API_KEY not set');
+    expect(fix).toContain('OPENROUTER_API_KEY');
+    expect(fix).toContain(OPENROUTER_DEFAULT_RERANKER_MODEL);
+    expect(fix).toContain('search.reranker.enabled false');
+  });
+
+  test('empty-string OPENROUTER_API_KEY counts as absent (#1249 posture)', () => {
+    const r = resolveDefaultRerankerModel({ OPENROUTER_API_KEY: '' }, { now: BEFORE });
+    expect(r.model).toBe(DEFAULT_RERANKER_MODEL);
+    expect(r.keyAware).toBe(false);
+    expect(r.readiness.ready).toBe(false);
+  });
+
+  test('the candidate list is the precedence contract: native first, OpenRouter second, every entry a listed reranker', () => {
+    expect(DEFAULT_RERANKER_CANDIDATES[0]).toBe(DEFAULT_RERANKER_MODEL);
+    expect(DEFAULT_RERANKER_CANDIDATES[1]).toBe(OPENROUTER_DEFAULT_RERANKER_MODEL);
+    for (const m of DEFAULT_RERANKER_CANDIDATES) {
+      // Recipe-known, touchpoint declared, allowlisted — so a candidate can
+      // never be "ready" on a key yet refused by gateway.rerank()'s allowlist.
+      const r = rerankerReadiness(m, { VOYAGE_API_KEY: 'x', OPENROUTER_API_KEY: 'x' }, { now: BEFORE });
+      expect(r.recipeKnown && r.hasTouchpoint && r.modelListed).toBe(true);
+      expect(r.sunset).toBeNull();
+    }
+  });
+
+  test('never throws on garbage env values', () => {
+    expect(() => resolveDefaultRerankerModel({ OPENROUTER_API_KEY: undefined, VOYAGE_API_KEY: undefined })).not.toThrow();
   });
 });

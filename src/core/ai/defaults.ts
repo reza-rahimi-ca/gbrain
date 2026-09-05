@@ -72,6 +72,19 @@ export const NEW_INSTALL_DEFAULT_RERANKER_MODEL = 'voyage:rerank-2.5';
 export const DEFAULT_RERANKER_MODEL = NEW_INSTALL_DEFAULT_RERANKER_MODEL;
 
 /**
+ * OPENROUTER_API_KEY-only reranker default — the same Voyage rerank-2.5
+ * cross-encoder, proxied by OpenRouter (`voyageai/` is OR's vendor slug,
+ * live-verified 2026-09-05; `voyage/` does not exist there). NOT a bundle
+ * value: `MODE_BUNDLES.*.reranker_model` stays `DEFAULT_RERANKER_MODEL`.
+ * `resolveDefaultRerankerModel()` (ai/reranker-readiness.ts) substitutes this
+ * ONLY when the native default is not ready (no VOYAGE_API_KEY) AND the
+ * OpenRouter key is present — so a brain with a Voyage key sees zero change,
+ * a Voyage+OpenRouter brain keeps the native route, and a keyless brain still
+ * fails open with the `no_key` skip exactly as before.
+ */
+export const OPENROUTER_DEFAULT_RERANKER_MODEL = 'openrouter:voyageai/rerank-2.5';
+
+/**
  * HISTORICAL legacy value — the sunsetting ZeroEntropy zerank-2 that was the
  * bundle/runtime default from v0.36 through v0.47.9. Nothing resolves to it
  * by default anymore; it stays a named constant so the RERANKER_SUNSETS row,
