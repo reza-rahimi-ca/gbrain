@@ -28,7 +28,9 @@ describe('autopilot self-upgrade static-shape regressions', () => {
     expect(AUTOPILOT_SRC).not.toMatch(/execvp\s*\(/);
   });
   test('the silent channel does swap-only, never a blocking full post-upgrade in the tick', () => {
-    expect(AUTOPILOT_SRC).toContain("execSync('gbrain upgrade --swap-only'");
+    // Self-invocation (defect 5): spawns the resolved CLI path, never a bare
+    // `gbrain` string that a squatted/stale PATH entry could hijack.
+    expect(AUTOPILOT_SRC).toContain("execFileSync(resolveGbrainCliPath(), ['upgrade', '--swap-only']");
     // The tick must not invoke the (up-to-30-min) post-upgrade inline.
     expect(AUTOPILOT_SRC).not.toContain("execSync('gbrain post-upgrade'");
   });

@@ -4,7 +4,7 @@
  * secret-free, self-disabling, and that the launchd plist is periodic.
  */
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { withEnv } from './helpers/with-env.ts';
@@ -13,9 +13,39 @@ import {
   generateBrainPullPlist,
   installDurabilityCron,
   durabilityJobStatus,
+  resolveGbrainCliPath,
 } from '../src/core/brain-repo-durability.ts';
 
 const TOKEN = 'ghp_SHOULD_NEVER_APPEAR';
+
+describe('resolveGbrainCliPath (defect 5 regression — sibling of autopilot.ts)', () => {
+  test('argv[1] self path wins over a DIFFERENT shim on PATH', async () => {
+    // Same production bug as commands/autopilot.ts's copy: `sources harden`
+    // bakes this resolved path into a generated cron wrapper, so preferring
+    // a `which gbrain` PATH lookup over the actually-invoked executable
+    // means the cron job could run a completely different `gbrain` install
+    // on every tick.
+    const origArg1 = process.argv[1];
+    const decoyDir = mkdtempSync(join(tmpdir(), 'gbrain-durability-decoy-'));
+    const decoyPath = join(decoyDir, 'gbrain');
+    const selfPath = '/opt/bun-install/global/node_modules/gbrain/bin/gbrain';
+    writeFileSync(decoyPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    process.argv[1] = selfPath;
+    try {
+      await withEnv(
+        { PATH: `${decoyDir}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}` },
+        () => {
+          const path = resolveGbrainCliPath();
+          expect(path).toBe(selfPath);
+          expect(path).not.toBe(decoyPath);
+        },
+      );
+    } finally {
+      process.argv[1] = origArg1;
+      rmSync(decoyDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('renderCronWrapper (D2 DB-free)', () => {
   const w = renderCronWrapper('wiki', '/data/clones/wiki', 'main', '/usr/local/bin/gbrain', '/home/u/.gbrain/brain-push.log');

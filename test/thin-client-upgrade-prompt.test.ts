@@ -28,6 +28,7 @@ import {
   _setVerifierForTest,
   _setPromptReaderForTest,
   _setUpgradeRunnerForTest,
+  resolveSelfGbrainPath,
   type PromptState,
 } from '../src/core/thin-client-upgrade-prompt.ts';
 import type { CliOptions } from '../src/core/cli-options.ts';
@@ -694,5 +695,53 @@ describe('maybePromptForUpgrade orchestrator', () => {
         sibling!.release();
       }
     });
+  });
+});
+
+// ============================================================================
+// resolveSelfGbrainPath (cross-cutting defect-5 pattern — #4)
+// ============================================================================
+
+describe('resolveSelfGbrainPath', () => {
+  test('argv[1] self path wins over a DIFFERENT shim on PATH', async () => {
+    // `defaultRunUpgrade` used to shell out to a bare `gbrain upgrade`,
+    // relying on whatever `gbrain` resolved to on $PATH — a different
+    // install than the one currently running the prompt could get upgraded
+    // instead. The resolver must prefer the actually-invoked executable.
+    const origArg1 = process.argv[1];
+    const decoyDir = mkdtempSync(join(tmpdir(), 'gbrain-upgrade-prompt-decoy-'));
+    const decoyPath = join(decoyDir, 'gbrain');
+    const selfPath = '/opt/bun-install/global/node_modules/gbrain/bin/gbrain';
+    writeFileSync(decoyPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    process.argv[1] = selfPath;
+    try {
+      await withEnv(
+        { PATH: `${decoyDir}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}` },
+        () => {
+          const path = resolveSelfGbrainPath();
+          expect(path).toBe(selfPath);
+          expect(path).not.toBe(decoyPath);
+        },
+      );
+    } finally {
+      process.argv[1] = origArg1;
+      rmSync(decoyDir, { recursive: true, force: true });
+    }
+  });
+
+  test('never resolves to a .ts source path (falls through to PATH lookup instead)', () => {
+    // Running via `bun run src/cli.ts`: execPath is the bun runtime, argv[1]
+    // is a .ts file — neither self-identifies, so the bare `gbrain` fallback
+    // (a real PATH lookup at spawn time) must fire instead of returning the
+    // unspawnable .ts path.
+    const origArg1 = process.argv[1];
+    process.argv[1] = '/some/project/src/cli.ts';
+    try {
+      const path = resolveSelfGbrainPath();
+      expect(path.endsWith('.ts')).toBe(false);
+      expect(path).toBe('gbrain');
+    } finally {
+      process.argv[1] = origArg1;
+    }
   });
 });
