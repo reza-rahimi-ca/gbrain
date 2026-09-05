@@ -125,6 +125,12 @@ describe('lookupEmbeddingPrice — nested gateway ids (#2504)', () => {
   test.each([
     ['openrouter:openai/text-embedding-3-large', 0.13, 'openai:text-embedding-3-large'],
     ['openrouter:voyage/voyage-4', 0.06, 'voyage:voyage-4'],
+    // OR's REAL Voyage vendor slug is `voyageai/` (live-verified 2026-09-05);
+    // the nested re-key lands on `voyageai:` and the provider alias maps it
+    // onto the `voyage:` rows — embeddings and the rerank-2.5 rows alike.
+    ['openrouter:voyageai/voyage-4', 0.06, 'voyage:voyage-4'],
+    ['openrouter:voyageai/voyage-4-lite', 0.02, 'voyage:voyage-4-lite'],
+    ['openrouter:voyageai/rerank-2.5', 0.05, 'voyage:rerank-2.5'],
     ['openrouter:mistral/mistral-embed', 0.10, 'mistral:mistral-embed'],
     ['openrouter:google/gemini-embedding-001', 0.15, 'google:gemini-embedding-001'],
   ])('%s falls back to the nested vendor row', (model, expected, key) => {

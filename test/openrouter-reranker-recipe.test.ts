@@ -19,6 +19,17 @@ describe('OpenRouter recipe — reranker touchpoint', () => {
     expect(m).toContain('nvidia/llama-nemotron-rerank-vl-1b-v2:free');
   });
 
+  test('models list includes the VoyageAI rerankers under OR\'s `voyageai/` slug (never `voyage/`)', () => {
+    const m = getRecipe('openrouter')!.touchpoints.reranker!.models;
+    // Live-verified 2026-09-05 at https://openrouter.ai/api/v1/rerank; the
+    // allowlist is exact-match, so the vendor slug must be spelled `voyageai/`.
+    expect(m).toContain('voyageai/rerank-2.5');
+    expect(m).toContain('voyageai/rerank-2.5-lite');
+    // `voyage/rerank-2.5` returns HTTP 400 on OR — listing it would turn a
+    // typo into a 5s timeout per query instead of a clean allowlist error.
+    expect(m).not.toContain('voyage/rerank-2.5');
+  });
+
   test('default_model is cohere/rerank-v3.5', () => {
     const tp = getRecipe('openrouter')!.touchpoints.reranker!;
     expect(tp.default_model).toBe('cohere/rerank-v3.5');
