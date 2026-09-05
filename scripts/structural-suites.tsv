@@ -214,6 +214,7 @@ test/phantom-redirect-per-source-lock.test.ts	phantom-redirect lock contract	3	r
 test/postgres-engine-singleton-ownership.test.ts	postgres-engine / module-singleton ownership (#1471)	7	readFileSync
 test/postgres-engine.test.ts	postgres-engine / search date filtering	1	readFileSync
 test/postgres-engine.test.ts	postgres-engine / search path timeout isolation	7	readFileSync
+test/postinstall.test.ts	scripts/postinstall.ts — self-resolution (defect 4 regression)	2	readFileSync
 test/private-visibility.test.ts	shared private predicate lives once (#4352 remediation)	1	readFileSync
 test/readme-hero-anchors.test.ts	README hero anchors (D9 regression guard)	5	readFileSync
 test/redos-hardening.test.ts	#1569 --no-schema-pack + heartbeat wiring (structural)	2	readFileSync

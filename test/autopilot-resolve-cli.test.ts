@@ -77,11 +77,39 @@ describe('resolveGbrainCliPath', () => {
     process.argv[1] = '/usr/local/bin/gbrain';
     try {
       const path = resolveGbrainCliPath();
-      // On a machine with `which gbrain`, we get the shim. On a machine
-      // without, argv[1] fallback fires. Either way the result is valid.
+      // Self-resolution (argv[1]) wins outright now (defect 5) — no PATH
+      // lookup even happens when argv[1] self-identifies.
       expect(path.endsWith('/gbrain') || path.endsWith('\\gbrain.exe')).toBe(true);
     } finally {
       process.argv[1] = origArg1;
+    }
+  });
+
+  test('argv[1] self path wins over a DIFFERENT shim on PATH (defect 5 regression)', async () => {
+    // Simulates the exact production bug: invoked via a Bun-installed
+    // absolute path (argv[1] ends in /gbrain) while an unrelated, decoy
+    // `/gbrain` sits earlier on $PATH (e.g. a stale Homebrew/Docker
+    // install). The resolver must prefer the actually-invoked executable —
+    // never a fresh PATH lookup — so `--install` bakes the right binary
+    // into the generated unit/cron entry.
+    const origArg1 = process.argv[1];
+    const decoyDir = mkdtempSync(join(tmpdir(), 'gbrain-resolve-decoy-'));
+    const decoyPath = join(decoyDir, 'gbrain');
+    const selfPath = '/opt/bun-install/global/node_modules/gbrain/bin/gbrain';
+    writeFileSync(decoyPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    process.argv[1] = selfPath;
+    try {
+      await withEnv(
+        { PATH: `${decoyDir}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}` },
+        () => {
+          const path = resolveGbrainCliPath();
+          expect(path).toBe(selfPath);
+          expect(path).not.toBe(decoyPath);
+        },
+      );
+    } finally {
+      process.argv[1] = origArg1;
+      rmSync(decoyDir, { recursive: true, force: true });
     }
   });
 });

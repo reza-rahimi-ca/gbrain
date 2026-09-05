@@ -105,8 +105,18 @@ function gbrainHome(): string {
 }
 
 /** Resolve the gbrain CLI path for the cron wrapper (inlined to avoid a
- *  core→commands import). which gbrain → process.execPath → argv[1] → "gbrain". */
-function resolveGbrainCliPath(): string {
+ *  core→commands import). process.execPath → argv[1] → which gbrain → "gbrain".
+ *  Self-path (execPath/argv1) wins over a PATH lookup (sibling of
+ *  commands/autopilot.ts's resolveGbrainCliPath): `which gbrain` answers
+ *  "what would a bare `gbrain` invocation resolve to", which can be a
+ *  DIFFERENT install than the one actually running `sources harden` — baking
+ *  that mismatched path into the generated cron wrapper would run the wrong
+ *  binary's `sources pull` on every tick. */
+export function resolveGbrainCliPath(): string {
+  const exec = process.execPath ?? '';
+  if (exec.endsWith('/gbrain') || exec.endsWith('\\gbrain.exe')) return exec;
+  const arg1 = process.argv[1] ?? '';
+  if (arg1.endsWith('/gbrain') || arg1.endsWith('\\gbrain.exe')) return arg1;
   try {
     // #2747: `env: process.env` required under Bun — see the sibling copy
     // of this function in commands/autopilot.ts for the full explanation
@@ -119,10 +129,6 @@ function resolveGbrainCliPath(): string {
     }).trim();
     if (which) return which;
   } catch { /* not on PATH */ }
-  const exec = process.execPath ?? '';
-  if (exec.endsWith('/gbrain') || exec.endsWith('\\gbrain.exe')) return exec;
-  const arg1 = process.argv[1] ?? '';
-  if (arg1.endsWith('/gbrain') || arg1.endsWith('\\gbrain.exe')) return arg1;
   return 'gbrain';
 }
 function credStoreFile(): string {

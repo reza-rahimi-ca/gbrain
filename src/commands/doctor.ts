@@ -1590,7 +1590,10 @@ export async function buildChecks(
   // `gbrain` that `which -a` finds (pure helpers in
   // src/core/npm-squat-check.ts) and warn when an unrelated install wins on
   // PATH or the entry is broken. Skips silently when gbrain isn't on PATH
-  // at all (e.g. running via `bun src/cli.ts`).
+  // at all (e.g. running via `bun src/cli.ts`). `which -a` is deliberately
+  // left as a real PATH lookup here — the check's entire purpose is "what
+  // would a bare `gbrain` invocation resolve to", which is inherently a PATH
+  // question and must stay PATH-order-based for squat detection to work.
   try {
     const { execSync } = await import('node:child_process');
     let candidates: string[] = [];
@@ -1606,8 +1609,22 @@ export async function buildChecks(
       // `which` exits non-zero when gbrain isn't on PATH (or is missing
       // entirely on this platform) — nothing to check.
     }
+    // Self-identify the executable actually running THIS doctor invocation
+    // (never a PATH lookup) so the message can lead with it when it diverges
+    // from whatever `which -a` returns first — a sparse PATH in
+    // non-interactive contexts (cron, minion jobs) can surface a
+    // stale/unrelated system `gbrain` as the PATH winner even though it is
+    // not what produced this report.
+    const execPath = process.execPath ?? '';
+    const arg1 = process.argv[1] ?? '';
+    const runningPath =
+      execPath.endsWith('/gbrain') || execPath.endsWith('\\gbrain.exe')
+        ? execPath
+        : arg1.endsWith('/gbrain') || arg1.endsWith('\\gbrain.exe')
+          ? arg1
+          : undefined;
     const { assessGbrainBinaries } = await import('../core/npm-squat-check.ts');
-    const assessment = assessGbrainBinaries(candidates);
+    const assessment = assessGbrainBinaries(candidates, runningPath);
     if (assessment.status !== 'skip') {
       checks.push({
         name: 'npm_squat',

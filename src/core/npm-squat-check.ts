@@ -174,7 +174,27 @@ export function classifyGbrainBinary(
  *  - ok   : the winning entry is the real binary (an unrelated install
  *           sitting BEHIND it is noted but not a warn).
  */
-export function assessGbrainBinaries(candidates: string[]): NpmSquatAssessment {
+/**
+ * `runningPath` (optional) is the CURRENTLY EXECUTING gbrain's own resolved
+ * path (`process.execPath`/`argv[1]` self-check, never a PATH lookup) —
+ * distinct from `candidates`, which come from `which -a gbrain` and answer a
+ * different question ("what would a bare `gbrain` invocation resolve to").
+ * The two can diverge: a non-interactive context (cron, a minion job) often
+ * carries a sparse PATH that omits the invoking install's own directory,
+ * surfacing an unrelated/stale system entry as the PATH winner even though
+ * it is NOT what produced this report.
+ *
+ * When they diverge, the divergence is stated FIRST, before the PATH-derived
+ * text — never appended as a trailing note, which would still read as if
+ * "gbrain on PATH is the real binary" describes this invocation. `runningPath`
+ * never changes `status`, `binaries`, or the PATH-order-based warn/ok logic
+ * below, which must stay keyed on real PATH precedence for squat detection
+ * (first-on-PATH-wins) to mean anything.
+ */
+export function assessGbrainBinaries(
+  candidates: string[],
+  runningPath?: string,
+): NpmSquatAssessment {
   const unique = [...new Set(candidates.map((c) => c.trim()).filter(Boolean))];
   if (unique.length === 0) {
     return { status: 'skip', message: 'gbrain not found on PATH', binaries: [] };
@@ -183,11 +203,17 @@ export function assessGbrainBinaries(candidates: string[]): NpmSquatAssessment {
   const first = binaries[0]!;
   const realIdx = binaries.findIndex((b) => b.kind === 'real');
   const foreignIdx = binaries.findIndex((b) => b.kind === 'foreign');
+  const prefix =
+    runningPath && runningPath !== first.path
+      ? `This invocation is actually running from ${runningPath} — the following describes ` +
+        `a bare \`gbrain\` PATH lookup, a separate question, not this invocation. `
+      : '';
 
   if (first.kind === 'broken') {
     return {
       status: 'warn',
       message:
+        prefix +
         `\`gbrain\` on PATH is a broken link (${first.path}). ` +
         `Note: gbrain is NOT distributed on npm — the npm package named "gbrain" is unrelated. ` +
         NPM_SQUAT_REMEDIATION,
@@ -199,6 +225,7 @@ export function assessGbrainBinaries(candidates: string[]): NpmSquatAssessment {
     return {
       status: 'warn',
       message:
+        prefix +
         `\`gbrain\` on PATH resolves to an unrelated npm package, not this project ` +
         `(${foreign.path} — ${foreign.detail}). gbrain is NOT distributed on npm. ` +
         NPM_SQUAT_REMEDIATION,
@@ -209,6 +236,7 @@ export function assessGbrainBinaries(candidates: string[]): NpmSquatAssessment {
     return {
       status: 'ok',
       message:
+        prefix +
         `real gbrain wins on PATH (${first.path}), but an unrelated npm package named ` +
         `"gbrain" is also installed (${binaries[foreignIdx]!.path}). Consider removing it: ` +
         `\`bun remove -g gbrain\` / \`npm uninstall -g gbrain\`.`,
@@ -218,9 +246,10 @@ export function assessGbrainBinaries(candidates: string[]): NpmSquatAssessment {
   return {
     status: 'ok',
     message:
-      first.kind === 'real'
+      prefix +
+      (first.kind === 'real'
         ? `gbrain on PATH is the real binary (${first.path}).`
-        : `no unrelated npm "gbrain" install detected on PATH (${first.path}).`,
+        : `no unrelated npm "gbrain" install detected on PATH (${first.path}).`),
     binaries,
   };
 }

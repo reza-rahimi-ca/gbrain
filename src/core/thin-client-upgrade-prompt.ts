@@ -21,7 +21,7 @@
 
 import { existsSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, unlinkSync, statSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
-import { execSync, execFileSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { compareVersions } from '../commands/migrations/index.ts';
 import { gbrainPath } from './config.ts';
 import type { GBrainConfig } from './config.ts';
@@ -312,8 +312,27 @@ export function _setPromptReaderForTest(fn: PromptReader | null): void {
 
 export type UpgradeRunner = () => void;
 
+/**
+ * Self-identify the CURRENTLY running gbrain's own path (never a PATH
+ * lookup) so `gbrain upgrade` below upgrades THIS install, not whatever
+ * `gbrain` happens to resolve to on $PATH (a different version, or an
+ * unrelated npm-squatted package). Mirrors the sibling resolvers in
+ * commands/autopilot.ts and core/brain-repo-durability.ts. Only accepts a
+ * path ending in `/gbrain`/`\gbrain.exe` — never `.ts` source or
+ * the bare bun runtime path — so a `bun run src/cli.ts` dev install (where
+ * execPath is the bun binary itself) correctly falls through to the PATH
+ * fallback below instead of misinterpreting `upgrade` as a bun subcommand.
+ */
+export function resolveSelfGbrainPath(): string {
+  const exec = process.execPath ?? '';
+  if (exec.endsWith('/gbrain') || exec.endsWith('\\gbrain.exe')) return exec;
+  const arg1 = process.argv[1] ?? '';
+  if (arg1.endsWith('/gbrain') || arg1.endsWith('\\gbrain.exe')) return arg1;
+  return 'gbrain';
+}
+
 function defaultRunUpgrade(): void {
-  execSync('gbrain upgrade', { stdio: 'inherit' });
+  execFileSync(resolveSelfGbrainPath(), ['upgrade'], { stdio: 'inherit' });
 }
 
 let _upgradeRunner: UpgradeRunner = defaultRunUpgrade;

@@ -205,3 +205,45 @@ describe('assessGbrainBinaries', () => {
     expect(a.binaries.length).toBe(1);
   });
 });
+
+describe('assessGbrainBinaries — runningPath is reported first, not a footnote (defect 8 regression)', () => {
+  // Doctor's npm_squat check used to report only whatever `which -a gbrain`
+  // resolved to, which can diverge from the executable actually running the
+  // doctor invocation (e.g. a sparse PATH in a non-interactive/cron context
+  // surfacing a stale system entry). `runningPath` is the self-identified
+  // (execPath/argv[1]) path of the CURRENT invocation. The bug being fixed
+  // here is specifically: a divergence must not be relegated to a trailing
+  // note appended after a PATH-winner statement that still reads as
+  // authoritative for this invocation — it must lead the message instead.
+
+  test('running path differs from PATH winner → leads the message, status/binaries unaffected', () => {
+    const withoutNote = assessGbrainBinaries([nativeBin]);
+    const withNote = assessGbrainBinaries([nativeBin], '/opt/bun-install/gbrain');
+    expect(withNote.status).toBe(withoutNote.status);
+    expect(withNote.binaries).toEqual(withoutNote.binaries);
+    expect(withNote.message).not.toBe(withoutNote.message);
+    expect(withNote.message).toContain('/opt/bun-install/gbrain');
+    expect(withNote.message).toContain('actually running');
+    // Must lead the message — not be appended after the PATH-derived claim.
+    expect(withNote.message.startsWith('This invocation is actually running from')).toBe(true);
+    expect(withNote.message.indexOf('actually running')).toBeLessThan(
+      withNote.message.indexOf('is the real binary'),
+    );
+  });
+
+  test('running path equals the PATH winner → no redundant note', () => {
+    const a = assessGbrainBinaries([nativeBin], nativeBin);
+    expect(a.message).not.toContain('actually running');
+  });
+
+  test('runningPath omitted (existing callers) → message unchanged', () => {
+    const a = assessGbrainBinaries([nativeBin]);
+    expect(a.message).not.toContain('actually running');
+  });
+
+  test('running path note leads the message on warn statuses too (foreign shadowing real)', () => {
+    const a = assessGbrainBinaries([foreignLink, realBinShapeLink], '/opt/bun-install/gbrain');
+    expect(a.status).toBe('warn');
+    expect(a.message.startsWith('This invocation is actually running from /opt/bun-install/gbrain')).toBe(true);
+  });
+});

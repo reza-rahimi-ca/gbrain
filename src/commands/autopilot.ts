@@ -21,7 +21,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, uti
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { detectExecutionEnvironment } from '../core/execution-env.ts';
 import { join, dirname, isAbsolute, resolve as resolvePath } from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadPreferences } from '../core/preferences.ts';
 import { loadConfig, loadConfigFileOnly, saveConfig, gbrainPath as gbrainHomePath } from '../core/config.ts';
@@ -153,13 +153,14 @@ function logError(phase: string, e: unknown) {
 /**
  * Enumerate %PATH% (Windows) for the gbrain CLI shim, honoring PATHEXT.
  *
- * On win32 this is the FIRST resolution path (`which` does not exist in
- * cmd/PowerShell); resolveGbrainCliPath calls it before the execPath and
- * argv[1] fallbacks. Unlike `where`, this NEVER looks at the current
- * directory, so a stray gbrain.exe in cwd cannot hijack resolution. Only
- * directly spawnable extensions (.exe/.com/.cmd/.bat) are accepted, and
- * only regular files - a directory named gbrain.exe cannot shadow a real
- * binary. Returns the first existing candidate, or '' when none exists.
+ * Fallback only: resolveGbrainCliPath tries execPath/argv[1]
+ * self-identification first, and calls this only when neither resolves;
+ * `which` doesn't exist in cmd/PowerShell, so this replaces it on win32.
+ * Unlike `where`, this NEVER looks at the current directory, so a stray
+ * gbrain.exe in cwd cannot hijack resolution. Only directly spawnable
+ * extensions (.exe/.com/.cmd/.bat) are accepted, and only regular files -
+ * a directory named gbrain.exe cannot shadow a real binary. Returns the
+ * first existing candidate, or '' when none exists.
  */
 export function resolveWindowsCliPath(): string {
   const pathext = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';');
@@ -185,42 +186,46 @@ export function resolveWindowsCliPath(): string {
 }
 
 /**
- * Resolve the gbrain CLI entrypoint for spawning the worker child.
+ * Resolve the gbrain CLI entrypoint for spawning the worker child, AND
+ * (via `writeWrapperScript`) for baking the path into generated launchd
+ * plists / systemd units / cron lines at `--install` time.
  *
  * A .ts source path is never a valid spawn target - spawning it fails with
- * EACCES because TypeScript source isn't executable. The canonical install
- * puts a shim at `/usr/local/bin/gbrain` (or wherever `which gbrain`
- * resolves to) that already wraps the right runtime+entrypoint; prefer it.
+ * EACCES because TypeScript source isn't executable, so a real self-path
+ * must end in `/gbrain` (or `\gbrain.exe`) to qualify.
  *
- * Order of resolution:
- *   1. Platform PATH lookup - `which gbrain` on POSIX; explicit %PATH%
- *      enumeration (resolveWindowsCliPath) on win32, where `which` does
- *      not exist (#3793).
- *   2. process.execPath if it ends with /gbrain (compiled binary, no shim).
- *   3. argv[1] if it ends with /gbrain (e.g., direct invocation of compiled
- *      binary without PATH). Never .ts source paths.
- *   4. Throw with a clear install hint.
+ * Self-identification (execPath, then argv[1]) is tried BEFORE any PATH
+ * lookup: a PATH lookup answers "what does a bare `gbrain` resolve to right
+ * now", which can be a different install than the one actually running (a
+ * stale/foreign entry shadowing a Bun-installed absolute path) — and
+ * `--install` would then bake the wrong binary into the daemon's unit/cron
+ * entry. Only when neither self-identifies (e.g. `bun run src/cli.ts` from
+ * source) does resolution fall back to a platform PATH lookup — explicit
+ * %PATH% enumeration on win32 (`which` doesn't exist there, #3793), `which
+ * gbrain` on POSIX — and finally throw with a clear install hint.
  */
 export function resolveGbrainCliPath(): string {
-  // #3793: `which` does not exist in cmd or PowerShell on Windows, so the
-  // bun-installed gbrain.exe shim on %PATH% was never found and autopilot
-  // died with "Could not resolve the gbrain CLI path". `where` would find
-  // it but has a cwd-hijack; use explicit %PATH% enumeration on win32.
+  const exec = process.execPath ?? '';
+  if (exec.endsWith('/gbrain') || exec.endsWith('\\gbrain.exe')) {
+    return exec;
+  }
+
+  const arg1 = process.argv[1] ?? '';
+  if (arg1.endsWith('/gbrain') || arg1.endsWith('\\gbrain.exe')) {
+    return arg1;
+  }
+
+  // Neither execPath nor argv[1] self-identifies as a spawnable gbrain —
+  // fall back to a PATH lookup as a last resort (dev machines running from
+  // source, where there is no "self" binary to point at).
   if (process.platform === 'win32') {
     const win = resolveWindowsCliPath();
     if (win) return win;
   } else {
     try {
-      // #2747: `env: process.env` is required under Bun. Bun's execSync
-      // snapshots process.env at Bun's OWN startup, not at call time - a
-      // runtime PATH mutation (dotenv/config loading, shell-profile sourcing
-      // in a wrapper, etc.) happening between Bun boot and this call is
-      // invisible to `which` without explicitly forwarding the current env.
-      // This is why "which gbrain" succeeds when run standalone (fresh Bun
-      // process, no prior mutation) but can fail from inside autopilot's own
-      // process at this exact call site. Same fix already applied to
-      // detectTini() in spawn-helpers.ts (see its comment) - this call site
-      // was missed.
+      // `env: process.env` is required: Bun's execSync snapshots env at
+      // Bun's own startup, not at call time, so a runtime PATH mutation
+      // (dotenv, shell-profile sourcing) is invisible to `which` otherwise.
       const which = execSync('which gbrain', {
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -230,15 +235,6 @@ export function resolveGbrainCliPath(): string {
         .split(/\r?\n/, 1)[0];
       if (which) return which;
     } catch { /* not on $PATH - fall through */ }
-  }
-  const exec = process.execPath ?? '';
-  if (exec.endsWith('/gbrain') || exec.endsWith('\\gbrain.exe')) {
-    return exec;
-  }
-
-  const arg1 = process.argv[1] ?? '';
-  if (arg1.endsWith('/gbrain') || arg1.endsWith('\\gbrain.exe')) {
-    return arg1;
   }
 
   // #2747: include what we actually saw so an operator (or a future bug
@@ -434,7 +430,10 @@ async function attemptAutopilotSelfUpgrade(
     console.log(`[autopilot] self-upgrade: applying ${VERSION} -> ${latestVersion} (idle, quiet hours).`);
 
     try {
-      execSync('gbrain upgrade --swap-only', {
+      // Self-invocation: this is the running install upgrading itself, so
+      // spawn THIS resolved binary rather than a bare `gbrain` (which a
+      // stale/squatted PATH entry could silently hijack).
+      execFileSync(resolveGbrainCliPath(), ['upgrade', '--swap-only'], {
         stdio: 'inherit',
         timeout: 300_000,
         env: { ...process.env, GBRAIN_SKIP_STARTUP_HOOKS: '1' },

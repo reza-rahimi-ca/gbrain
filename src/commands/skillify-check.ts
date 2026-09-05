@@ -28,6 +28,7 @@ import { basename, dirname, join, resolve } from 'path';
 import { spawnSync } from 'child_process';
 
 import { gbrainPath } from '../core/config.ts';
+import { resolveGbrainCliPath } from './autopilot.ts';
 import {
   describeReceiptStatus,
   findReceiptForSkill,
@@ -92,7 +93,20 @@ let _resolverCache: ResolverResult | null = null;
 function runCheckResolvableCached(): ResolverResult {
   if (_resolverCache) return _resolverCache;
   try {
-    const res = spawnSync('gbrain', ['check-resolvable', '--json'], {
+    // Self-invocation: spawn THIS resolved binary, never a bare `gbrain`
+    // that a stale/squatted PATH entry could hijack. Resolution failure
+    // (no self path, nothing on PATH either) is the same "not runnable"
+    // condition as a spawn failure below.
+    let gbrainBin: string;
+    try {
+      gbrainBin = resolveGbrainCliPath();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`[skillify] gbrain check-resolvable not runnable: ${reason}`);
+      _resolverCache = { ok: false, detail: `check-resolvable unavailable: ${reason}` };
+      return _resolverCache;
+    }
+    const res = spawnSync(gbrainBin, ['check-resolvable', '--json'], {
       encoding: 'utf-8',
       maxBuffer: 10 * 1024 * 1024,
     });
