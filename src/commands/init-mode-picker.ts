@@ -19,6 +19,8 @@
  */
 
 import type { BrainEngine } from '../core/engine.ts';
+import { loadConfigFileOnly, loadConfigWithEngine, type GBrainConfig } from '../core/config.ts';
+import { mergedProviderEnv } from '../core/ai/provider-env.ts';
 import { readLineSafe } from './init.ts';
 import {
   SEARCH_MODES,
@@ -114,18 +116,27 @@ async function resolveInputs(engine: BrainEngine): Promise<ModePickerInputs> {
     pageCount = stats.page_count ?? 0;
   } catch { /* swallow */ }
 
+  // Same key plane init's reranker-default write and every search/doctor
+  // surface read (env > file plane > DB-plane provider keys, via
+  // mergedProviderEnv — which also folds the GEMINI_API_KEY alias): a brain
+  // keyed only through `config set openrouter_api_key` must not be classed
+  // keyless and pushed onto the reranker-off bundle.
+  let mergedCfg: GBrainConfig | null = null;
+  try { mergedCfg = loadConfigFileOnly(); } catch { mergedCfg = null; }
+  try { mergedCfg = await loadConfigWithEngine(engine, mergedCfg); } catch { /* file plane alone */ }
+  const keys = mergedProviderEnv(mergedCfg, process.env);
+
   return {
     subagentModel,
     defaultModel,
     hasExpansionKey: Boolean(
-      process.env.ANTHROPIC_API_KEY ||
-      process.env.OPENAI_API_KEY ||
-      process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-      process.env.GEMINI_API_KEY || // gateway accepts GEMINI_API_KEY as a first-class alias
+      keys.ANTHROPIC_API_KEY ||
+      keys.OPENAI_API_KEY ||
+      keys.GOOGLE_GENERATIVE_AI_API_KEY ||
       // OpenRouter is a chat-capable key (PROVIDER_TIER_DEFAULTS row): the
       // utility tier — which expansion runs on — resolves to
       // openrouter:anthropic/claude-haiku-4.5 when it is the only key.
-      process.env.OPENROUTER_API_KEY,
+      keys.OPENROUTER_API_KEY,
     ),
     pageCount,
   };

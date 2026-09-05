@@ -9,6 +9,7 @@ import { listRecipes, getRecipe } from '../core/ai/recipes/index.ts';
 import { embeddingDimsForModel } from '../core/ai/model-resolver.ts';
 import { configureGateway, embedOne, isAvailable as gwIsAvailable, chat as gwChat } from '../core/ai/gateway.ts';
 import { buildGatewayConfig } from '../core/ai/build-gateway-config.ts';
+import { mergedProviderEnv } from '../core/ai/provider-env.ts';
 import { probeOllama, probeLMStudio } from '../core/ai/probes.ts';
 import { loadConfig } from '../core/config.ts';
 import { AIConfigError, AITransientError } from '../core/ai/errors.ts';
@@ -53,6 +54,35 @@ function configureFromEnv(): void {
     return;
   }
   configureGateway({ env: { ...process.env } });
+}
+
+/**
+ * The provider-key plane every readiness surface reads: file-plane keys
+ * (~/.gbrain/config.json) folded under process.env via `mergedProviderEnv`
+ * (env wins for real values). `list` already reads this plane through
+ * `buildGatewayConfig`; `explain` read bare process.env, so a brain keyed only
+ * via `config set openrouter_api_key` rendered every provider "✗ not set" and
+ * recommended a signup while search, doctor and the gateway resolved the key
+ * fine. Pre-init (no config yet, or an unreadable one) → process.env alone.
+ */
+export function providerEnvPlane(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  let cfg: ReturnType<typeof loadConfig> = null;
+  try { cfg = loadConfig(); } catch { cfg = null; }
+  return mergedProviderEnv(cfg, env);
+}
+
+/** `env_detected` for `providers explain`: key presence on the shared plane. */
+export function detectProviderEnv(env: Record<string, string | undefined>): Record<string, boolean> {
+  return {
+    OPENAI_API_KEY: !!env.OPENAI_API_KEY,
+    GOOGLE_GENERATIVE_AI_API_KEY: !!env.GOOGLE_GENERATIVE_AI_API_KEY,
+    ANTHROPIC_API_KEY: !!env.ANTHROPIC_API_KEY,
+    VOYAGE_API_KEY: !!env.VOYAGE_API_KEY,
+    OPENROUTER_API_KEY: !!env.OPENROUTER_API_KEY,
+    DEEPSEEK_API_KEY: !!env.DEEPSEEK_API_KEY,
+    GROQ_API_KEY: !!env.GROQ_API_KEY,
+    TOGETHER_API_KEY: !!env.TOGETHER_API_KEY,
+  };
 }
 
 export function envReady(recipe: Recipe, env: NodeJS.ProcessEnv = process.env): boolean {
@@ -372,16 +402,9 @@ async function runExplain(args: string[]): Promise<void> {
   const asJson = args.includes('--json') || args.includes('-j');
 
   const recipes = listRecipes();
-  const env_detected = {
-    OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
-    GOOGLE_GENERATIVE_AI_API_KEY: !!process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-    ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
-    VOYAGE_API_KEY: !!process.env.VOYAGE_API_KEY,
-    OPENROUTER_API_KEY: !!process.env.OPENROUTER_API_KEY,
-    DEEPSEEK_API_KEY: !!process.env.DEEPSEEK_API_KEY,
-    GROQ_API_KEY: !!process.env.GROQ_API_KEY,
-    TOGETHER_API_KEY: !!process.env.TOGETHER_API_KEY,
-  };
+  // Same plane list/test/init/doctor read — never bare process.env.
+  const env = providerEnvPlane();
+  const env_detected = detectProviderEnv(env);
 
   // Parallel probes for local providers (1s timeout each)
   const [ollama, lmstudio] = await Promise.all([probeOllama(), probeLMStudio()]);
@@ -409,7 +432,7 @@ async function runExplain(args: string[]): Promise<void> {
         cost_per_1m_tokens_usd:
           modelPrice.kind === 'known' ? modelPrice.pricePerMTok : m.cost_per_1m_tokens_usd,
         price_last_verified: m.price_last_verified,
-        env_ready: envReady(r) || (r.id === 'ollama' && ollama.models_endpoint_valid === true),
+        env_ready: envReady(r, env) || (r.id === 'ollama' && ollama.models_endpoint_valid === true),
         tier: r.tier,
         pros: prosFor(r, 'embedding'),
         cons: r.sunset
@@ -433,7 +456,7 @@ async function runExplain(args: string[]): Promise<void> {
         model: m.models[0],
         cost_per_1m_tokens_usd: m.cost_per_1m_tokens_usd,
         price_last_verified: m.price_last_verified,
-        env_ready: envReady(r),
+        env_ready: envReady(r, env),
         tier: r.tier,
         pros: prosFor(r, 'expansion'),
         cons: consFor(r),
@@ -448,7 +471,7 @@ async function runExplain(args: string[]): Promise<void> {
         cost_per_1m_input_usd: m.cost_per_1m_input_usd,
         cost_per_1m_output_usd: m.cost_per_1m_output_usd,
         price_last_verified: m.price_last_verified,
-        env_ready: envReady(r),
+        env_ready: envReady(r, env),
         tier: r.tier,
         pros: prosFor(r, 'chat'),
         cons: consFor(r),
