@@ -62,16 +62,20 @@ API keys live in `~/.gbrain/config.json` (file plane) or env vars (`VOYAGE_API_K
 export VOYAGE_API_KEY=pa-...          # default embedding (voyage-4) + reranker (rerank-2.5) — one key
 export OPENAI_API_KEY=sk-...          # alternative embeddings; also powers automatic fact extraction + chat models
 export ANTHROPIC_API_KEY=sk-ant-...   # automatic fact extraction + chat models; also improves search via query expansion
+export OPENROUTER_API_KEY=sk-or-...   # ONE key for everything: voyage-4 embeddings (1024d) + rerank-2.5 reranker + chat/extraction, all proxied by OpenRouter
 ```
+
+With **only** `OPENROUTER_API_KEY` set, `gbrain init --pglite` needs no flags: embeddings land on `openrouter:voyageai/voyage-4` @ 1024d (the same embedding space as the native default, so a later move to a direct Voyage key needs no reindex), the reranker default resolves to `openrouter:voyageai/rerank-2.5` on the same key, and every chat-shaped feature routes to `openrouter:anthropic/*` — nothing is written to `models.*`. OpenRouter is the auto-pick only when it is the sole key; a native Voyage/Anthropic/OpenAI key alongside it keeps winning. Details in [`docs/integrations/embedding-providers.md`](integrations/embedding-providers.md) → OpenRouter.
 
 Reading a value back: `gbrain config get <key>` prints redacted by default — sensitive keys (any `key`/`secret`/`token`/`password`-segmented name) print `***`, and a `postgres://` / `postgresql://` value like `database_url` has its `user:password` userinfo replaced with `***` (host, port, database, and query string preserved) — because `get` output lands in agent transcripts and shell history. Scripts that need the real value pass `--raw` (accepted before or after the key). `config show` and the `Set <key> = ...` confirmation that `config set` prints redact the same way. `get` keeps stdout a bare value and reports which plane answered (file/env or DB) on stderr.
 
 Chat-shaped features (automatic fact extraction, enrichment, synthesis, query
-expansion) route to whichever supported chat key is present (Anthropic or
-OpenAI) — Anthropic when both are set, OpenAI when it is the only one; other
-chat providers need an explicit `models.*` pin. With neither key, they stay off
-calmly and memory comes from agent-authored `## Facts` fences and the
-`remember` verb.
+expansion, `think`, dream-cycle jobs, the subagent loop) route to whichever
+supported chat key is present, in this order: Anthropic, then OpenAI, then
+OpenRouter (`openrouter:anthropic/*` — the auto-pick only when it is the sole
+key); other chat providers need an explicit `models.*` pin. With no chat key at
+all, they stay off calmly and memory comes from agent-authored `## Facts`
+fences and the `remember` verb.
 
 For the autopilot daemon specifically, keys and process-level env (`NODE_EXTRA_CA_CERTS`, proxy vars, custom base URLs) belong in `~/.gbrain/env` — a 0600 file created by `gbrain autopilot --install` and sourced by the daemon wrapper (interactive shell rc files never reach daemon shells; the path honors `GBRAIN_HOME`). Re-run `gbrain autopilot --install` after editing it so the daemon reloads.
 
