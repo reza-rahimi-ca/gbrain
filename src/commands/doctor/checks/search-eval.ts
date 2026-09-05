@@ -426,14 +426,18 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
     // the post-init drift case the init-time caveat would have shown if init
     // had been re-run.
     try {
-      const { loadConfig } = await import('../../../core/config.ts');
+      const { loadConfig, loadConfigWithEngine, isConfigTruthy } = await import('../../../core/config.ts');
       const cfg = loadConfig();
       const chatModel = cfg?.chat_model;
-      const { isConfigTruthy } = await import('../../../core/config.ts');
       const gatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
       const gatewayLoopEnabled = isConfigTruthy(gatewayLoopRaw);
       const { isAnthropicProvider } = await import('../../../core/model-config.ts');
-      if (chatModel && !isAnthropicProvider(chatModel) && !process.env.ANTHROPIC_API_KEY && !gatewayLoopEnabled) {
+      // Key presence on the SAME plane the gateway resolves (env > file plane >
+      // DB-plane provider keys) — a config.json-only ANTHROPIC key is a key.
+      const { mergedProviderEnv } = await import('../../../core/ai/provider-env.ts');
+      const mergedCfg = await loadConfigWithEngine(engine, cfg).catch(() => cfg);
+      const anthropicKey = mergedProviderEnv(mergedCfg, process.env).ANTHROPIC_API_KEY;
+      if (chatModel && !isAnthropicProvider(chatModel) && !anthropicKey && !gatewayLoopEnabled) {
         return {
           name: 'subagent_capability',
           status: 'warn',

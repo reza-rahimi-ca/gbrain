@@ -689,22 +689,30 @@ function printKeylessContinueNotice(): void {
   );
 }
 
-async function resolveEmbeddingByEnv(out: ResolvedAIOptions, nonInteractive: boolean): Promise<void> {
-  // v0.46.3: provider readiness folds FILE-PLANE keys too (docs explicitly
-  // permit `voyage_api_key` etc. in ~/.gbrain/config.json) — env still wins
-  // via buildGatewayConfig's spread order. Without this, a non-interactive
-  // fresh install keyed only via config.json reported zero providers and
-  // silently persisted keyless mode.
+/**
+ * The provider-key plane init's Tier-3 detection reads for EVERY touchpoint
+ * (embedding, expansion, chat) and the post-init Anthropic caveats: process.env
+ * with the file-plane keys folded under it via `buildGatewayConfig` (env wins).
+ * v0.46.3 added the fold for the embedding pick (docs explicitly permit
+ * `voyage_api_key` / `openrouter_api_key` etc. in ~/.gbrain/config.json —
+ * without it a non-interactive install keyed only via config.json persisted
+ * keyless mode); expansion and chat detection kept reading bare process.env,
+ * so the same install picked an embedding provider yet classed chat keyless.
+ * Fold failure → env-only readiness (pre-v0.46.3 behavior).
+ */
+async function initProviderEnv(): Promise<NodeJS.ProcessEnv> {
   const fileCfgForKeys = loadConfigFileOnly();
-  let effectiveEnv: NodeJS.ProcessEnv = process.env;
-  if (fileCfgForKeys) {
-    try {
-      const { buildGatewayConfig } = await import('../core/ai/build-gateway-config.ts');
-      effectiveEnv = buildGatewayConfig(fileCfgForKeys).env as NodeJS.ProcessEnv;
-    } catch {
-      // Fold failure → env-only readiness (pre-v0.46.3 behavior).
-    }
+  if (!fileCfgForKeys) return process.env;
+  try {
+    const { buildGatewayConfig } = await import('../core/ai/build-gateway-config.ts');
+    return buildGatewayConfig(fileCfgForKeys).env as NodeJS.ProcessEnv;
+  } catch {
+    return process.env;
   }
+}
+
+async function resolveEmbeddingByEnv(out: ResolvedAIOptions, nonInteractive: boolean): Promise<void> {
+  const effectiveEnv = await initProviderEnv();
   const ready = await groupReadyByProvider('embedding', effectiveEnv);
   const isTTY = !nonInteractive && !!process.stdin.isTTY;
 
@@ -764,7 +772,7 @@ async function resolveEmbeddingByEnv(out: ResolvedAIOptions, nonInteractive: boo
         (r.touchpoints.embedding?.models?.length ?? 0) > 0,
     );
     if (sunsetReady.length > 0) {
-      const fileCfg = fileCfgForKeys;
+      const fileCfg = loadConfigFileOnly();
       const existingConfiglessBrain =
         !!fileCfg &&
         !!(fileCfg.database_path || fileCfg.database_url) &&
@@ -873,7 +881,7 @@ async function resolveEmbeddingByEnv(out: ResolvedAIOptions, nonInteractive: boo
 }
 
 async function resolveExpansionByEnv(out: ResolvedAIOptions): Promise<void> {
-  const ready = await groupReadyByProvider('expansion');
+  const ready = await groupReadyByProvider('expansion', await initProviderEnv());
   // Per D10: chat/expansion fall through to gateway default when ambiguous.
   if (ready.length === 1) {
     const r = ready[0].recipe;
@@ -890,7 +898,7 @@ async function resolveExpansionByEnv(out: ResolvedAIOptions): Promise<void> {
 /** @internal exported for tests — pins the no-persist contract (key-aware
  *  runtime resolution replaced install-time chat_model pins). */
 export async function resolveChatByEnv(out: ResolvedAIOptions): Promise<void> {
-  const ready = await groupReadyByProvider('chat');
+  const ready = await groupReadyByProvider('chat', await initProviderEnv());
   if (ready.length === 1) {
     const r = ready[0].recipe;
     const tp = r.touchpoints.chat!;
@@ -1383,7 +1391,7 @@ export async function initPGLite(opts: {
     // T6 (D7): post-init subagent-Anthropic caveat. Fires for both auto-pick
     // and picker paths so users see the implication of running on a chat
     // provider that can't drive the subagent loop.
-    if (opts.aiOpts?.chat_model && !opts.aiOpts.chat_model.startsWith('anthropic:') && !process.env.ANTHROPIC_API_KEY) {
+    if (opts.aiOpts?.chat_model && !opts.aiOpts.chat_model.startsWith('anthropic:') && !(await initProviderEnv()).ANTHROPIC_API_KEY) {
       const { printSubagentAnthropicCaveat } = await import('./init-provider-picker.ts');
       printSubagentAnthropicCaveat((s) => process.stderr.write(s));
     }
@@ -1717,7 +1725,7 @@ export async function initPostgresCore(opts: {
     }
 
     // T6 (D7): post-init subagent-Anthropic caveat.
-    if (opts.aiOpts?.chat_model && !opts.aiOpts.chat_model.startsWith('anthropic:') && !process.env.ANTHROPIC_API_KEY) {
+    if (opts.aiOpts?.chat_model && !opts.aiOpts.chat_model.startsWith('anthropic:') && !(await initProviderEnv()).ANTHROPIC_API_KEY) {
       const { printSubagentAnthropicCaveat } = await import('./init-provider-picker.ts');
       printSubagentAnthropicCaveat((s) => process.stderr.write(s));
     }
@@ -2050,4 +2058,4 @@ NOTES
 }
 
 /** Test-only seam (v0.48.2): the reranker-default write is pure enough to unit-test with a stub engine. */
-export const _exports_for_test = { writeNewInstallRerankerDefault, resolveEmbeddingByEnv };
+export const _exports_for_test = { writeNewInstallRerankerDefault, resolveEmbeddingByEnv, resolveExpansionByEnv, initProviderEnv };

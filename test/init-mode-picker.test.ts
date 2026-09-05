@@ -275,6 +275,33 @@ describe('runModePicker — non-TTY auto-select + idempotent', () => {
     });
   });
 
+  test('openrouter_api_key present ONLY in config.json (no env key) also counts as expansion-capable', async () => {
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { emptyHome } = await import('./helpers/with-env.ts');
+    const home = emptyHome();
+    mkdirSync(join(home, '.gbrain'), { recursive: true });
+    writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({ openrouter_api_key: 'sk-or-file' }));
+    const noKeysInEnv = {
+      ANTHROPIC_API_KEY: undefined,
+      OPENAI_API_KEY: undefined,
+      GOOGLE_GENERATIVE_AI_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+      OPENROUTER_API_KEY: undefined,
+    };
+    // Control: an empty home with the same env is keyless → conservative.
+    await withEnv({ ...noKeysInEnv, GBRAIN_HOME: emptyHome() }, async () => {
+      expect(await runModePicker(engine, { force: true })).toBe('conservative');
+    });
+    // The picker reads the same fold (mergedProviderEnv) as search/doctor/init's
+    // reranker write — pre-fix it read bare process.env and pushed a
+    // config.json-keyed brain onto the reranker-off bundle.
+    await withEnv({ ...noKeysInEnv, GBRAIN_HOME: home }, async () => {
+      const picked = await runModePicker(engine, { force: true });
+      expect(['balanced', 'tokenmax']).toContain(picked);
+    });
+  });
+
   test('recommendModeFor no-key reason names OpenRouter among the expansion-capable keys', () => {
     const r = recommendModeFor({ hasExpansionKey: false });
     expect(r.mode).toBe('conservative');
