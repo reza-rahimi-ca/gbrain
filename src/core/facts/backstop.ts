@@ -148,7 +148,7 @@ export function __resetBackstopWarningsForTests(): void {
  */
 export const KEYLESS_EXTRACTION_GUIDANCE =
   'memory comes from agent-authored `## Facts` fences and the `remember` verb. ' +
-  'One optional key enables automatic extraction (OpenAI or Anthropic).';
+  'One optional key enables automatic extraction (OpenAI, Anthropic, or OpenRouter).';
 
 const KEYLESS_NOTE =
   `[facts] keyless: automatic fact extraction off — ${KEYLESS_EXTRACTION_GUIDANCE}`;

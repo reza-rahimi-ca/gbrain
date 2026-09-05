@@ -234,6 +234,16 @@ describe('transport-class failures throw typed', () => {
     } finally {
       delete process.env.OPENAI_API_KEY;
     }
+    // OPENROUTER_API_KEY alone is a chat-capable key too (PROVIDER_TIER_DEFAULTS
+    // row) — an OpenRouter-only brain must never read as calm "(keyless)" in
+    // doctor's facts_extraction_health while its extraction is actually failing.
+    process.env.OPENROUTER_API_KEY = 'sk-or-test';
+    try {
+      expect(await classifyUnavailable('anthropic:claude-sonnet-4-6')).toBe('keyed');
+      expect(await classifyUnavailable('openrouter:anthropic/claude-sonnet-4.6')).toBe('keyed');
+    } finally {
+      delete process.env.OPENROUTER_API_KEY;
+    }
   });
 });
 

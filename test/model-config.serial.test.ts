@@ -13,12 +13,15 @@ import {
   openaiStaticTierFallback,
   DEFAULT_ALIASES,
   TIER_DEFAULTS,
+  OPENROUTER_TIER_DEFAULTS,
   PROVIDER_TIER_DEFAULTS,
   isAnthropicProvider,
   isOpenRouterAnthropic,
   isOpenRouterSubagentFamily,
   _resetDeprecationWarningsForTest,
 } from '../src/core/model-config.ts';
+import { classifyCapabilities } from '../src/core/ai/capabilities.ts';
+import { getRecipe } from '../src/core/ai/recipes/index.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 
 class StubEngine {
@@ -40,7 +43,7 @@ const origWrite = process.stderr.write.bind(process.stderr);
 // only OPENAI_API_KEY (or carries keys in config.json). Save/delete the key
 // envs and point GBRAIN_HOME at a nonexistent dir so the config read misses —
 // local runs then match keyless CI byte-for-byte.
-const PINNED_ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GBRAIN_HOME'] as const;
+const PINNED_ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GBRAIN_HOME'] as const;
 let savedEnv: Record<string, string | undefined>;
 
 beforeEach(() => {
@@ -380,9 +383,49 @@ describe('resolveTierDefault — key-aware matrix (injected env used exclusively
     expect(resolveTierDefault('reasoning', openaiOnly)).toBe(openaiStaticTierFallback().reasoning);
   });
 
-  test('table order is the precedence contract: anthropic first, openai second', () => {
+  test('table order is the precedence contract: anthropic first, openai second, openrouter last', () => {
     expect(PROVIDER_TIER_DEFAULTS[0].provider).toBe('anthropic');
     expect(PROVIDER_TIER_DEFAULTS[1].provider).toBe('openai');
+    expect(PROVIDER_TIER_DEFAULTS[2].provider).toBe('openrouter');
+    expect(PROVIDER_TIER_DEFAULTS[2].envKey).toBe('OPENROUTER_API_KEY');
+    expect(PROVIDER_TIER_DEFAULTS).toHaveLength(3);
+  });
+
+  test('openrouter-only → OPENROUTER_TIER_DEFAULTS for every tier (one key drives chat-shaped work)', () => {
+    const env = { OPENROUTER_API_KEY: 'sk-or-test' };
+    expect(resolveTierDefault('reasoning', env)).toBe(OPENROUTER_TIER_DEFAULTS.reasoning);
+    expect(resolveTierDefault('utility', env)).toBe(OPENROUTER_TIER_DEFAULTS.utility);
+    expect(resolveTierDefault('deep', env)).toBe(OPENROUTER_TIER_DEFAULTS.deep);
+    expect(resolveTierDefault('subagent', env)).toBe(OPENROUTER_TIER_DEFAULTS.subagent);
+    for (const id of Object.values(OPENROUTER_TIER_DEFAULTS)) expect(id.startsWith('openrouter:')).toBe(true);
+  });
+
+  test('openrouter never beats a native key: anthropic+openrouter → anthropic; openai+openrouter → openai', () => {
+    expect(resolveTierDefault('reasoning', { ANTHROPIC_API_KEY: 'sk-ant', OPENROUTER_API_KEY: 'sk-or' }))
+      .toBe(TIER_DEFAULTS.reasoning);
+    expect(resolveTierDefault('reasoning', { OPENAI_API_KEY: 'sk', OPENROUTER_API_KEY: 'sk-or' }))
+      .toBe(openaiStaticTierFallback().reasoning);
+    // Empty-string OpenRouter key is absent (#1249) → keyless shape preserved.
+    expect(resolveTierDefault('reasoning', { OPENROUTER_API_KEY: '' })).toBe(TIER_DEFAULTS.reasoning);
+  });
+
+  test('every OPENROUTER_TIER_DEFAULTS id is on the OR recipe\'s curated chat list and classifies for its tier', () => {
+    const chatList = getRecipe('openrouter')!.touchpoints.chat!.models;
+    for (const [tier, id] of Object.entries(OPENROUTER_TIER_DEFAULTS)) {
+      const bare = id.slice('openrouter:'.length);
+      expect(chatList, `${tier} default ${id} must be a curated OR chat entry`).toContain(bare);
+      // Tool-capable + prompt-cacheable + (anthropic/ family) subagent-loop
+      // capable → `ok`, so the subagent tier never falls back or cost-warns.
+      expect(classifyCapabilities(id), `${tier} default ${id}`).toBe('ok');
+    }
+    // The subagent default is a family the handler auto-routes through the
+    // gateway tool loop (live replay pin under test/e2e/).
+    expect(isOpenRouterSubagentFamily(OPENROUTER_TIER_DEFAULTS.subagent)).toBe(true);
+  });
+
+  test('providerKeyReady: an OR-routed pin is servable on OPENROUTER_API_KEY alone', () => {
+    expect(providerKeyReady(OPENROUTER_TIER_DEFAULTS.reasoning, { OPENROUTER_API_KEY: 'sk-or' })).toBe(true);
+    expect(providerKeyReady(OPENROUTER_TIER_DEFAULTS.reasoning, {})).toBe(false);
   });
 });
 
@@ -446,6 +489,40 @@ describe('resolveModelDetailed — sources + key-aware step 7', () => {
     } finally {
       delete process.env.OPENAI_API_KEY;
     }
+  });
+
+  test('openrouter-only: every chat-shaped tier resolves to the OR route with source tier_default', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or-test';
+    try {
+      for (const tier of ['utility', 'reasoning', 'deep'] as const) {
+        const r = await resolveModelDetailed(null, { tier, fallback: 'sonnet' });
+        expect(r.model).toBe(OPENROUTER_TIER_DEFAULTS[tier]);
+        expect(r.source).toBe('tier_default');
+      }
+    } finally {
+      delete process.env.OPENROUTER_API_KEY;
+    }
+  });
+
+  test('subagent + openrouter-only: resolves openrouter:anthropic/claude-sonnet-4.6 — no fallback to TIER_DEFAULTS.subagent, no warn', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or-test';
+    try {
+      const r = await resolveModelDetailed(null, { tier: 'subagent', fallback: 'sonnet' });
+      expect(r.model).toBe(OPENROUTER_TIER_DEFAULTS.subagent);
+      expect(r.source).toBe('tier_default');
+      // enforceSubagentCapable saw `ok` (tools + subagent loop + prompt cache
+      // on the anthropic/ family via OR): nothing on stderr, no silent
+      // substitution of the native Anthropic default whose key is absent.
+      expect(stderrCapture).toBe('');
+      expect(r.model).not.toBe(TIER_DEFAULTS.subagent);
+    } finally {
+      delete process.env.OPENROUTER_API_KEY;
+    }
+  });
+
+  test('resolveEffectiveChatModel (engine-free runtime/report resolver) follows the OR tier default', () => {
+    const r = resolveEffectiveChatModel(null, { OPENROUTER_API_KEY: 'sk-or-test' });
+    expect(r).toEqual({ model: OPENROUTER_TIER_DEFAULTS.reasoning, source: 'tier_default' });
   });
 });
 

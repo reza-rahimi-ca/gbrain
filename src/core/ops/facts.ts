@@ -142,7 +142,7 @@ const extract_facts: Operation = {
           'commitment | belief — it defaults to plain "fact" otherwise), set `entity` ' +
           `when the fact is about a person/company/project, and ${visibilityPin}. ` +
           'Or author a `## Facts` fence on the entity page. To enable automatic ' +
-          'extraction, add an OpenAI or Anthropic API key.',
+          'extraction, add an OpenAI, Anthropic, or OpenRouter API key.',
       };
     }
     if (r.skipped_reason) {
