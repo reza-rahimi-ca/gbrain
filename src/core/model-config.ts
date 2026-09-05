@@ -173,6 +173,21 @@ export const PROVIDER_TIER_DEFAULTS: ReadonlyArray<{
   { provider: 'openrouter', envKey: 'OPENROUTER_API_KEY', tiers: (tier) => OPENROUTER_TIER_DEFAULTS[tier] },
 ];
 
+/**
+ * True when `providerId` has a key-aware tier default (a PROVIDER_TIER_DEFAULTS
+ * row): the runtime routes every chat-shaped tier to it whenever its key is
+ * the one present, so an install-time `expansion_model` / `chat_model` pin for
+ * it is redundant — and harmful, because a pin freezes the provider choice
+ * (stale the moment the user switches keys, and the source of the
+ * "[models] configured expansion_model … has no usable provider key" warn).
+ * init's Tier-3 detection persists a pin ONLY for providers this returns
+ * false for (groq, deepseek, google, …), which have no runtime default.
+ */
+export function hasKeyAwareTierDefault(providerId: string): boolean {
+  const id = providerId.trim().toLowerCase();
+  return PROVIDER_TIER_DEFAULTS.some((entry) => entry.provider === id);
+}
+
 /** loadConfig, throw-safe (the hasAnthropicKey pattern): unreadable config = env-only. */
 function throwSafeLoadConfig(): GBrainConfig | null {
   try {

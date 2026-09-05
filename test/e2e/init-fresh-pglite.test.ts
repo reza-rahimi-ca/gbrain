@@ -89,6 +89,51 @@ describe('v0.37 T12 — fresh init env-detection (D1, D2, D3) + persistence (D5)
 
 // ============================================================================
 
+describe('OpenRouter one-key install — init persists the embedding tuple and NO model pins', () => {
+  let tmpHome: string;
+
+  beforeAll(() => { tmpHome = makeTempHome(); });
+  afterAll(() => { rmSync(tmpHome, { recursive: true, force: true }); });
+
+  test('OPENROUTER_API_KEY only (env) → voyage-4 @ 1024 via OR; no expansion_model/chat_model, no models.* / search.reranker.* rows', async () => {
+    const r = await runCli(['init', '--pglite', '--non-interactive'], {
+      gbrainHome: tmpHome,
+      env: { OPENROUTER_API_KEY: 'sk-or-test-only-for-init-resolution-NOT-CALLED' },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr).toContain('Detected OPENROUTER_API_KEY');
+    // Expansion + chat are announced as key-aware runtime defaults, not pins.
+    expect(r.stderr).toMatch(/Query expansion will use openrouter:anthropic\/claude-haiku-4\.5 \(key-aware default; nothing written to config\)/);
+    expect(r.stderr).toMatch(/Chat \+ fact extraction will use openrouter:anthropic\/claude-sonnet-4\.6 \(key-aware default; nothing written to config\)/);
+
+    // File plane: the embedding tuple (schema-sizing, file-plane canonical)
+    // and nothing model-shaped beyond it. init does NOT copy the env key into
+    // config.json (same as every other provider) — `gbrain config set
+    // OPENROUTER_API_KEY …` is the documented way to persist it.
+    const cfg = JSON.parse(readFileSync(join(tmpHome, '.gbrain', 'config.json'), 'utf-8')) as Record<string, unknown>;
+    expect(cfg.engine).toBe('pglite');
+    expect(cfg.embedding_model).toBe('openrouter:voyageai/voyage-4');
+    expect(cfg.embedding_dimensions).toBe(1024);
+    expect(cfg.expansion_model).toBeUndefined();
+    expect(cfg.chat_model).toBeUndefined();
+    expect(cfg.openrouter_api_key).toBeUndefined();
+    const modelShaped = Object.keys(cfg).filter((k) => k.startsWith('models') || k.startsWith('search'));
+    expect(modelShaped).toEqual([]);
+
+    // DB plane: no models.* or search.reranker.* row was written either — the
+    // key-aware bundle default already reranks with openrouter:voyageai/rerank-2.5,
+    // and `gbrain config get <key>` on an absent row is exit 1 "Config key not found".
+    for (const key of ['models.expansion', 'models.default', 'search.reranker.model', 'search.reranker.enabled']) {
+      const g = await runCli(['config', 'get', key], { gbrainHome: tmpHome, env: {} });
+      expect(g.exitCode).toBe(1);
+      expect(g.stderr).toContain(`Config key not found: ${key}`);
+      expect(g.stdout.trim()).toBe('');
+    }
+  }, 240000);
+});
+
+// ============================================================================
+
 describe('v0.45 DX wave — non-TTY no-key defaults to keyless (typo still fail-loud)', () => {
   let tmpHome: string;
   let typoHome: string;
