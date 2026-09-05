@@ -90,6 +90,12 @@ export type PriceLookupResult =
  */
 const EMBEDDING_PROVIDER_ALIASES: Record<string, string> = {
   'azure-openai': 'openai',
+  // OpenRouter nests Voyage under the `voyageai/` vendor slug
+  // (`openrouter:voyageai/voyage-4`); the #2504 nested re-key lands here as
+  // `voyageai:voyage-4`, so alias it onto the `voyage:` rows — OR bills
+  // Voyage's own per-token rate (live `usage.cost` 2026-09-05), so the vendor
+  // row is the honest estimate for embeddings AND the rerank-2.5 rows.
+  voyageai: 'voyage',
 };
 
 /**

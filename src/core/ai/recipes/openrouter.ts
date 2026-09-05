@@ -149,12 +149,20 @@ export const openrouterCompatFetch = (async (
  *   openrouter:anthropic/claude-sonnet-4.6
  *   openrouter:google/gemini-3-flash-preview
  *
- * Embeddings: OpenRouter exposes `/v1/embeddings` proxying OpenAI's
- * text-embedding-3-small (1536 dims) plus Matryoshka shrink via the SDK's
- * `dimensions` field. Catalog also includes text-embedding-3-large,
- * google/gemini-embedding-2-preview, qwen3-embedding-8b, and bge-m3 — users
- * opt in via `--embedding-model openrouter:<id>` (openai-compat tier accepts
- * arbitrary IDs at the gateway; recipe lists are advisory, not enforcing).
+ * Embeddings: OpenRouter exposes `/v1/embeddings`. The canonical pick
+ * (`default_model`) is `voyageai/voyage-4` @ 1024d — the same model the
+ * native new-install default (`voyage:voyage-4`) uses, so an
+ * OPENROUTER_API_KEY-only install lands on the system default embedding
+ * space and can later move to a native Voyage key with no reindex. The
+ * catalog also proxies OpenAI's text-embedding-3-small (1536 dims, models[0]
+ * for back-compat) / -large, qwen3-embedding-8b, bge-m3 and
+ * google/gemini-embedding-2-preview — users opt in via
+ * `--embedding-model openrouter:<id>` (openai-compat tier accepts arbitrary
+ * IDs at the gateway; recipe lists are advisory, not enforcing). NOTE: OR's
+ * public `/api/v1/models` catalog does NOT list embedding/rerank models —
+ * the Voyage ids below were verified against the live endpoints
+ * (2026-09-05); the slug is `voyageai/…`, and `voyage/…` returns HTTP 400
+ * "Model does not exist".
  *
  * Chat: `/v1/chat/completions` proxies every chat model OpenRouter routes,
  * with tool-calling per-model. The chat models list below is a curated entry
@@ -162,13 +170,19 @@ export const openrouterCompatFetch = (async (
  * envelope, not every individual model's capability. When in doubt about a
  * specific model, check https://openrouter.ai/models.
  *
- * Reranker: `/api/v1/rerank` proxies cross-encoder rerankers (Cohere v3.5/4-fast/4-pro
- * and NVIDIA Nemotron VL). Wire shape matches `gateway.rerank()`:
- * `{ query, documents, model }` → `{ results: [{ index, relevance_score }] }`.
+ * Reranker: `/api/v1/rerank` proxies cross-encoder rerankers (Cohere v3.5/4-fast/4-pro,
+ * NVIDIA Nemotron VL, and VoyageAI rerank-2.5 / rerank-2.5-lite). Wire shape
+ * matches `gateway.rerank()`: `{ query, documents, model, top_n? }` →
+ * `{ results: [{ index, relevance_score, document? }] }` (live-verified for
+ * the Voyage models 2026-09-05; the extra `document` echo is ignored).
  * Unlike embedding/chat, the reranker path strictly enforces the `models`
  * allowlist (no openai-compat bypass) — adding new rerank models requires a
- * recipe edit. Cohere bills per-search; the `cost_per_1m_tokens_usd` value
- * is a pseudo-rate for the budget tracker's `chars/4` heuristic.
+ * recipe edit. `default_model` stays Cohere so existing OR users who rely on
+ * it see no change; the OPENROUTER_API_KEY-only reranker DEFAULT is chosen
+ * upstream of the recipe by `resolveDefaultRerankerModel()`
+ * (ai/reranker-readiness.ts → `openrouter:voyageai/rerank-2.5`). Cohere
+ * bills per-search; the `cost_per_1m_tokens_usd` value is a pseudo-rate for
+ * the budget tracker's `chars/4` heuristic.
  *
  * Attribution: OpenRouter recommends `HTTP-Referer` (required for app
  * attribution) + `X-OpenRouter-Title` (preferred; `X-Title` kept as
@@ -210,7 +224,22 @@ export const openrouter: Recipe = {
   },
   touchpoints: {
     embedding: {
-      models: ['openai/text-embedding-3-small'],
+      // models[0] stays text-embedding-3-small for back-compat with surfaces
+      // that read array position; the CANONICAL pick every "choose a model for
+      // the user" surface resolves is `default_model` below (voyage.ts pattern:
+      // its models[0] is voyage-4-large, its default_model is voyage-4).
+      models: [
+        'openai/text-embedding-3-small',
+        'voyageai/voyage-4',
+        'voyageai/voyage-4-large',
+        'voyageai/voyage-4-lite',
+      ],
+      // OPENROUTER_API_KEY-only installs auto-pick this (init single-ready
+      // path, the interactive picker, `gbrain init --model openrouter`) — the
+      // same embedding space as the native new-install default
+      // NEW_INSTALL_DEFAULT_EMBEDDING_MODEL (`voyage:voyage-4`), so no
+      // `--embedding-dimensions` is needed (model_dims resolves 1024).
+      default_model: 'voyageai/voyage-4',
       // #4114: per-model native dims for the catalog the docs invite users to
       // pick. The old recipe-wide `default_dims: 1536` was only right for
       // text-embedding-3-small — `migrate embeddings --to openrouter:bge-m3`
@@ -228,7 +257,11 @@ export const openrouter: Recipe = {
         'baai/bge-m3': 1024,
         // VoyageAI via OpenRouter (added to OR 2026-07-27). All three default
         // to 1024 despite Matryoshka support for 2048/512/256 — probed against
-        // the live endpoint, not inferred from the model card.
+        // the live `/api/v1/embeddings` endpoint (re-verified 2026-09-05:
+        // `usage.cost` bills at Voyage's own $0.06 / $0.12 / $0.02 per M),
+        // not inferred from the model card. The slug is `voyageai/`; the
+        // `voyage/` spelling does not exist on OR (HTTP 400) and deliberately
+        // stays unlisted so it resolves to 0 dims instead of a plausible 1024.
         'voyageai/voyage-4': 1024,
         'voyageai/voyage-4-large': 1024,
         'voyageai/voyage-4-lite': 1024,
@@ -241,8 +274,12 @@ export const openrouter: Recipe = {
       // (Weaviate analysis); 768 is a practical intermediate. Users opt into
       // a smaller dim via `gbrain config set embedding_dimensions <N>`.
       dims_options: [512, 768, 1024, 1536],
-      cost_per_1m_tokens_usd: 0.02,
-      price_last_verified: '2026-05-20',
+      // Display hint for the CANONICAL model (voyageai/voyage-4 — OR bills
+      // Voyage's own $0.06/M, live `usage.cost` 2026-09-05). Billing math goes
+      // through src/core/embedding-pricing.ts, which re-keys the nested
+      // `voyageai/` vendor onto the `voyage:` rows.
+      cost_per_1m_tokens_usd: 0.06,
+      price_last_verified: '2026-09-05',
       // OpenAI's published per-request aggregate is ~300K tokens for embeddings
       // (per-input cap is 8192). This is the AGGREGATE budget the gateway uses
       // to pre-split batches, NOT per-input. Per-input is enforced upstream.
@@ -294,7 +331,11 @@ export const openrouter: Recipe = {
         'nvidia/llama-nemotron-rerank-vl-1b-v2:free',
         // VoyageAI rerankers. OR serves these at /api/v1/rerank returning the
         // same {results:[{index,relevance_score}]} shape gateway.rerank()
-        // already parses; the only thing blocking them was this allowlist.
+        // already parses (live-verified 2026-09-05 — `top_n` honored,
+        // `usage.cost` at Voyage's $0.05/M; fixture pinned by
+        // test/ai/openrouter-voyage-rerank-wire.test.ts); the only thing
+        // blocking them was this allowlist. `voyage/rerank-2.5` is NOT a
+        // valid OR slug (HTTP 400) and stays unlisted on purpose.
         'voyageai/rerank-2.5',
         'voyageai/rerank-2.5-lite',
       ],

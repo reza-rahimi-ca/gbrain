@@ -65,6 +65,31 @@ describe('recipe: openrouter', () => {
     expect(r.touchpoints.embedding!.trust_custom_dims).toBe(true);
   });
 
+  test('2c. canonical embedding pick is voyageai/voyage-4 @ 1024 (OPENROUTER_API_KEY-only installs need no --embedding-dimensions)', () => {
+    const r = getRecipe('openrouter')!;
+    const e = r.touchpoints.embedding!;
+    // The canonical pick every "choose a model for the user" surface resolves
+    // (init single-ready auto-pick, the picker, `--model openrouter`) is the
+    // same embedding space as the native new-install default voyage:voyage-4.
+    expect(e.default_model).toBe('voyageai/voyage-4');
+    expect(e.models).toContain(e.default_model!);
+    // models[0] is unchanged (back-compat for array-position readers).
+    expect(e.models[0]).toBe('openai/text-embedding-3-small');
+    // Live-probed native widths (2026-09-05): the v4 trio returns 1024.
+    expect(embeddingDimsForModel(r, e.default_model)).toBe(1024);
+    expect(embeddingDimsForModel(r, 'openrouter:voyageai/voyage-4')).toBe(1024);
+    expect(embeddingDimsForModel(r, 'openrouter:voyageai/voyage-4-large')).toBe(1024);
+    expect(embeddingDimsForModel(r, 'openrouter:voyageai/voyage-4-lite')).toBe(1024);
+    // `voyage/voyage-4` is NOT an OpenRouter slug (HTTP 400 "Model does not
+    // exist") — it must not inherit a plausible 1024 that would let a typo'd
+    // install plan a column for a model that can never answer.
+    expect(embeddingDimsForModel(r, 'openrouter:voyage/voyage-4')).toBe(0);
+    expect(e.models).not.toContain('voyage/voyage-4');
+    // The display cost hint tracks the canonical model (Voyage's $0.06/M).
+    expect(e.cost_per_1m_tokens_usd).toBe(0.06);
+    expect(e.price_last_verified).toBe('2026-09-05');
+  });
+
   test('3. chat touchpoint accepts arbitrary provider/model IDs (openai-compat tier)', () => {
     const r = getRecipe('openrouter')!;
     expect(r.touchpoints.chat).toBeDefined();
