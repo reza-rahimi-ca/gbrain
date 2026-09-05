@@ -446,12 +446,17 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
       }
     } catch { /* loadConfig may throw; fall through */ }
 
+    // No config key set: report the KEY-AWARE tier default the runtime will
+    // actually use (an OPENROUTER_API_KEY-only brain resolves to the OR route,
+    // not the native Anthropic id), instead of a hardcoded model name.
+    const { resolveTierDefault } = await import('../../../core/model-config.ts');
+    const keyAwareDefault = resolveTierDefault('subagent');
     return {
       name: 'subagent_capability',
       status: 'ok',
       message: resolvedModel && resolvedSource
         ? `Subagent model resolves via ${resolvedSource} to "${resolvedModel}" with full tool-loop capability`
-        : `Subagent tier resolves to default (claude-sonnet-4-6) — full tool-loop capability`,
+        : `Subagent tier resolves to the key-aware default (${keyAwareDefault}) — full tool-loop capability`,
     };
   } catch (e) {
     return {

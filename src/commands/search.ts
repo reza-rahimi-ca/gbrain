@@ -68,7 +68,16 @@ function formatModesText(report: SearchModesReport): string {
   if (rr) {
     lines.push('');
     if (!rr.enabled) {
-      lines.push(`Reranker: off (resolved) — ${rr.model}${rr.required_key ? ` would need ${rr.required_key}` : ''}`);
+      // Off by mode/config, not by key: say whether flipping it on would
+      // actually run (the key-aware default can already be ready — e.g. an
+      // OPENROUTER_API_KEY-only brain on `conservative`), instead of telling
+      // the user a key they have set is missing.
+      const keyNote = rr.required_key
+        ? rr.key_present
+          ? ` is ready (${rr.required_key} present) — enable: gbrain config set search.reranker.enabled true`
+          : ` would need ${rr.required_key}`
+        : '';
+      lines.push(`Reranker: off (resolved) — ${rr.model}${keyNote}`);
     } else if (rr.ready) {
       lines.push(`Reranker: ${rr.model} (enabled) — ${rr.required_key ? `${rr.required_key} present` : 'no key required'}`);
     } else {

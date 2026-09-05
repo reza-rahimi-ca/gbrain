@@ -38,10 +38,13 @@ export interface ModePickerInputs {
   subagentModel?: string | null;
   /** Configured default model id. */
   defaultModel?: string | null;
-  /** True iff an expansion-capable API key (Anthropic / OpenAI / Google) is
-   *  configured. LLM query expansion routes through the gateway's chat lane,
-   *  not the embedding lane — an OpenAI-only gate wrongly told Anthropic-keyed
-   *  installs "no LLM expansion possible". */
+  /** True iff an expansion-capable API key (Anthropic / OpenAI / Google /
+   *  OpenRouter) is configured. LLM query expansion routes through the
+   *  gateway's chat lane, not the embedding lane — an OpenAI-only gate wrongly
+   *  told Anthropic-keyed installs "no LLM expansion possible", and an
+   *  OpenRouter-only install (key-aware chat tiers route to
+   *  `openrouter:anthropic/*`) was likewise pushed to `conservative`, which
+   *  also switches the reranker off. */
   hasExpansionKey?: boolean;
   /** Approximate page count of the brain (after initSchema, before bulk import). */
   pageCount?: number;
@@ -55,7 +58,7 @@ export interface ModePickerInputs {
  * shape per the v0.32.3 install-picker directive):
  *   - Opus / Frontier model OR Sonnet / unknown → tokenmax (max-quality default)
  *   - Haiku subagent → conservative (cost-sensitive setups)
- *   - No expansion-capable key (Anthropic/OpenAI/Google) → conservative
+ *   - No expansion-capable key (Anthropic/OpenAI/Google/OpenRouter) → conservative
  *     (LLM expansion cannot run anyway, so tight budget makes more sense)
  *
  * Rationale: the previous "default to balanced unless Opus detected" logic
@@ -75,7 +78,7 @@ export function recommendModeFor(inputs: ModePickerInputs): { mode: SearchMode; 
   if (inputs.hasExpansionKey === false) {
     return {
       mode: 'conservative',
-      reason: 'No expansion-capable API key (Anthropic/OpenAI/Google) — semantic cache still works, but LLM query expansion cannot run.',
+      reason: 'No expansion-capable API key (Anthropic/OpenAI/Google/OpenRouter) — semantic cache still works, but LLM query expansion cannot run.',
     };
   }
   const opus = /opus/i.test(inputs.defaultModel ?? '') || /opus/i.test(inputs.subagentModel ?? '');
@@ -118,7 +121,11 @@ async function resolveInputs(engine: BrainEngine): Promise<ModePickerInputs> {
       process.env.ANTHROPIC_API_KEY ||
       process.env.OPENAI_API_KEY ||
       process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-      process.env.GEMINI_API_KEY, // gateway accepts GEMINI_API_KEY as a first-class alias
+      process.env.GEMINI_API_KEY || // gateway accepts GEMINI_API_KEY as a first-class alias
+      // OpenRouter is a chat-capable key (PROVIDER_TIER_DEFAULTS row): the
+      // utility tier — which expansion runs on — resolves to
+      // openrouter:anthropic/claude-haiku-4.5 when it is the only key.
+      process.env.OPENROUTER_API_KEY,
     ),
     pageCount,
   };

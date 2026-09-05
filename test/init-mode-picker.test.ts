@@ -251,4 +251,33 @@ describe('runModePicker — non-TTY auto-select + idempotent', () => {
     const picked = await runModePicker(engine);
     expect(picked).toBe('conservative');
   });
+
+  test('OPENROUTER_API_KEY as the only key counts as expansion-capable → NOT the conservative (reranker-off) bundle', async () => {
+    const noOtherKeys = {
+      ANTHROPIC_API_KEY: undefined,
+      OPENAI_API_KEY: undefined,
+      GOOGLE_GENERATIVE_AI_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+    };
+    // Control: with no keys at all the no-key short-circuit still wins.
+    await withEnv({ ...noOtherKeys, OPENROUTER_API_KEY: undefined }, async () => {
+      expect(await runModePicker(engine, { force: true })).toBe('conservative');
+    });
+    // Pre-fix the same short-circuit fired for an OpenRouter-only install
+    // ("No expansion-capable API key (Anthropic/OpenAI/Google)"), which also
+    // switched the reranker off — the key-aware chat tiers route expansion to
+    // openrouter:anthropic/claude-haiku-4.5, so it must NOT.
+    await withEnv({ ...noOtherKeys, OPENROUTER_API_KEY: 'sk-or-test' }, async () => {
+      const picked = await runModePicker(engine, { force: true });
+      expect(picked).not.toBe('conservative');
+      expect(['balanced', 'tokenmax']).toContain(picked);
+      expect(await engine.getConfig('search.mode')).toBe(picked);
+    });
+  });
+
+  test('recommendModeFor no-key reason names OpenRouter among the expansion-capable keys', () => {
+    const r = recommendModeFor({ hasExpansionKey: false });
+    expect(r.mode).toBe('conservative');
+    expect(r.reason).toContain('OpenRouter');
+  });
 });
