@@ -30,6 +30,7 @@
  */
 
 import { listRecipes } from '../core/ai/recipes/index.ts';
+import { embeddingDimsForModel } from '../core/ai/model-resolver.ts';
 import { envReady, formatRecipeTable } from './providers.ts';
 import { readLineSafe } from './init.ts';
 import { probeOllama, type ProbeResult } from '../core/ai/probes.ts';
@@ -40,7 +41,8 @@ export interface PickedProvider {
   modelId: string;
   /** Full `provider:model` string, ready for configureGateway. */
   fullModel: string;
-  /** Resolved dim (recipe's `default_dims`). */
+  /** Resolved dim for the picked model: `model_dims[model]` when the recipe
+   *  declares it, else the recipe's `default_dims` (embeddingDimsForModel). */
   dim: number;
   /** Whether the recipe also covers chat/expansion (informational). */
   hasChat: boolean;
@@ -181,13 +183,19 @@ export async function pickProvider(opts: PickProviderOpts): Promise<PickedProvid
   const lines = ready.map((r, i) => {
     const tp = r.touchpoints[opts.touchpoint];
     let label = `  ${i + 1}) ${r.id}`;
+    // v0.46.3: the displayed row must match what a pick actually selects —
+    // the canonical model (default_model), not array position.
+    const canonical =
+      tp && 'models' in tp && Array.isArray(tp.models) && tp.models.length > 0
+        ? ('default_model' in tp && tp.default_model) || tp.models[0]
+        : undefined;
     if (opts.touchpoint === 'embedding' && tp && 'default_dims' in tp) {
-      label += `  (${tp.default_dims}d)`;
+      // Per-model width when the recipe declares one (OpenRouter's catalog
+      // spans 1024–4096 with `default_dims: 0`), else the recipe-wide default.
+      label += `  (${embeddingDimsForModel(r, canonical)}d)`;
     }
-    if (tp && 'models' in tp && Array.isArray(tp.models) && tp.models.length > 0) {
-      // v0.46.3: show the canonical model (default_model), not array position —
-      // the displayed row must match what a pick actually selects.
-      label += `  ${('default_model' in tp && tp.default_model) || tp.models[0]}`;
+    if (canonical) {
+      label += `  ${canonical}`;
     }
     const hint = localHints.get(r.id);
     if (hint) label += `  [${hint}]`;
@@ -242,9 +250,13 @@ export async function pickProvider(opts: PickProviderOpts): Promise<PickedProvid
     printSubagentAnthropicCaveat(writeStderr);
   }
 
+  // Per-model width first (recipe `model_dims`), recipe default second — the
+  // same resolver init's single-ready auto-pick uses, so a picked
+  // `openrouter:voyageai/voyage-4` sizes the schema at 1024, not the recipe's
+  // `default_dims: 0` (which would have written an unusable 0-wide column).
   const dim =
     opts.touchpoint === 'embedding' && 'default_dims' in tp
-      ? (tp as { default_dims: number }).default_dims
+      ? embeddingDimsForModel(picked, modelId)
       : 0;
 
   return {

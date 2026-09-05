@@ -591,6 +591,7 @@ function printNoEmbeddingProviderHint(typos: Array<{ userSet: string; suggested:
   console.error('  export VOYAGE_API_KEY=pa-…        # semantic search (voyage:voyage-4, 1024d) — default');
   console.error('  export OPENAI_API_KEY=sk-…        # semantic search (1536d) + automatic fact extraction');
   console.error('  export ANTHROPIC_API_KEY=sk-ant-… # automatic fact extraction (no embeddings API)');
+  console.error('  export OPENROUTER_API_KEY=sk-or-… # ONE key for everything: voyage-4 embeddings (1024d) + rerank-2.5 + chat/extraction');
   console.error('Then re-run: gbrain init --pglite');
   console.error('');
   console.error('Or pick explicitly:');
@@ -677,7 +678,8 @@ function printKeylessContinueNotice(): void {
     'No provider keys detected — continuing in keyless mode:\n' +
     '  keyword search + memory your agent writes down itself. Everything works.\n' +
     '  One optional key upgrades capabilities — OpenAI: semantic search + automatic\n' +
-    '  fact extraction; Voyage: semantic search; Anthropic: fact extraction.\n' +
+    '  fact extraction; Voyage: semantic search; Anthropic: fact extraction;\n' +
+    '  OpenRouter: all of the above on one key.\n' +
     '  Fact extraction activates as soon as the key is set (no re-init); semantic\n' +
     '  search needs a re-run:\n' +
     '  `gbrain init --force --pglite --embedding-model <id>` (re-imports via `gbrain sync`).',
@@ -2045,4 +2047,4 @@ NOTES
 }
 
 /** Test-only seam (v0.48.2): the reranker-default write is pure enough to unit-test with a stub engine. */
-export const _exports_for_test = { writeNewInstallRerankerDefault };
+export const _exports_for_test = { writeNewInstallRerankerDefault, resolveEmbeddingByEnv };

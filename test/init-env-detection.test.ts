@@ -52,6 +52,24 @@ describe('groupReadyByProvider — embedding touchpoint', () => {
     expect(got.map(p => p.recipeId)).not.toContain('zeroentropyai');
   });
 
+  test('OPENROUTER_API_KEY alone → openrouter is ready (one-key install)', async () => {
+    const ready = await groupReadyByProvider('embedding', { OPENROUTER_API_KEY: 'sk-or-test' } as NodeJS.ProcessEnv);
+    expect(ready.map((r) => r.recipeId)).toEqual(['openrouter']);
+    // The auto-pick surfaces resolve `default_model ?? models[0]` — for OR that
+    // is the Voyage-4 route, the same embedding space as the native default.
+    const tp = ready[0].recipe.touchpoints.embedding!;
+    expect(tp.default_model).toBe('voyageai/voyage-4');
+  });
+
+  test('OPENROUTER_API_KEY + VOYAGE_API_KEY → both ready (init keeps the native Voyage canonical pick)', async () => {
+    const ready = await groupReadyByProvider('embedding', {
+      OPENROUTER_API_KEY: 'sk-or-test',
+      VOYAGE_API_KEY: 'pa-test',
+    } as NodeJS.ProcessEnv);
+    const ids = ready.map((r) => r.recipeId).sort();
+    expect(ids).toEqual(['openrouter', 'voyage']);
+  });
+
   test('OPENAI_API_KEY + VOYAGE_API_KEY → both providers in ready list', async () => {
     const got = await groupReadyByProvider('embedding', {
       OPENAI_API_KEY: 'sk-test',
