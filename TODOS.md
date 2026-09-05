@@ -1,6 +1,5 @@
 # TODOS
 
-
 ## Security fix wave follow-ups (filed 2026-09-15, follow-up from v0.50.5.0)
 
 - [ ] **P2 — cwd-`.env` quarantine: decide the remaining `GBRAIN_*` variables.**
@@ -264,6 +263,22 @@
   (acceptance + rejection). Per-subcommand rows need the marker regex to
   capture `args[0]` per cli.ts bypass branch, and a rejection case per row.
   **Effort:** M. **Priority:** P3.
+
+## Verified baseline test failures (filed 2026-09-05)
+
+- [ ] **P2 — Restore a green full unit suite from baseline `941dc75cd`.**
+  A detached worktree at the clean starting commit reproduced these failures,
+  so they predate the OpenRouter follow-up defect work:
+  `test/sync-rename-reconcile.serial.test.ts` (frontmatter slug-authority
+  rejection retry), `test/pglite-disconnect-watchdog.serial.test.ts`
+  (watchdog attribution missing from captured stderr),
+  `test/process-watchdog.serial.test.ts` (SIGTERM attribution missing from
+  captured stderr), and two assertions in `test/scripts/merge-lcov.test.ts`
+  (SF normalization when the checkout directory itself is named `src`).
+  The extraction and capture failures seen during one parallel run did not
+  reproduce individually and were caused by sharing one exported
+  `GBRAIN_HOME` across test shards. Keep this item separate from the eight
+  scoped defect fixes unless one of those fixes depends on the same path.
 
 ## Community fix wave follow-ups (filed 2026-09-01, v0.48.1.0 wave)
 
