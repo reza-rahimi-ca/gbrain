@@ -7,9 +7,60 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { formatRecipeTable, formatEnvOutput, sunsetMarker, sunsetMarkerText, envReady } from '../src/commands/providers.ts';
+import {
+  formatRecipeTable,
+  formatEnvOutput,
+  sunsetMarker,
+  sunsetMarkerText,
+  envReady,
+  pickRecommended,
+  type ProviderOption,
+} from '../src/commands/providers.ts';
 import { listRecipes, getRecipe } from '../src/core/ai/recipes/index.ts';
 import type { Recipe } from '../src/core/ai/types.ts';
+
+/** Minimal embedding rows in the shape runExplain builds (id = provider:canonical). */
+function embOpt(id: string, extra: Partial<ProviderOption> = {}): ProviderOption {
+  return { id, touchpoint: 'embedding', model: id.split(':').slice(1).join(':'), env_ready: true, tier: 'native', pros: [], cons: [], ...extra };
+}
+const EXPLAIN_EMBEDDING_ROWS: ProviderOption[] = [
+  embOpt('voyage:voyage-4', { dims: 1024 }),
+  embOpt('openai:text-embedding-3-small', { dims: 1536 }),
+  embOpt('openrouter:voyageai/voyage-4', { dims: 1024, tier: 'openai-compat' }),
+  embOpt('google:gemini-embedding-2', { dims: 768 }),
+  embOpt('ollama:nomic-embed-text', { dims: 768 }),
+  embOpt('zeroentropyai:zembed-1', { dims: 1280, deprecated: { date: '2026-09-04', replacement: 'voyage:voyage-4' } }),
+];
+
+describe('pickRecommended (providers explain) — same precedence as init auto-pick', () => {
+  const none = { OPENAI_API_KEY: false, GOOGLE_GENERATIVE_AI_API_KEY: false, ANTHROPIC_API_KEY: false, VOYAGE_API_KEY: false, OPENROUTER_API_KEY: false };
+
+  test('OPENROUTER_API_KEY only → openrouter:voyageai/voyage-4, reason says one key covers embeddings + reranker + chat', () => {
+    const r = pickRecommended(EXPLAIN_EMBEDDING_ROWS, { ...none, OPENROUTER_API_KEY: true }, false);
+    expect(r.id).toBe('openrouter:voyageai/voyage-4');
+    expect(r.reason).toContain('OPENROUTER_API_KEY set');
+    expect(r.reason).toContain('rerank-2.5');
+    expect(r.reason).toContain('1024');
+  });
+
+  test('OpenRouter never beats a native key: Voyage / OpenAI / Google / local Ollama all win over it', () => {
+    expect(pickRecommended(EXPLAIN_EMBEDDING_ROWS, { ...none, VOYAGE_API_KEY: true, OPENROUTER_API_KEY: true }, false).id).toBe('voyage:voyage-4');
+    expect(pickRecommended(EXPLAIN_EMBEDDING_ROWS, { ...none, OPENAI_API_KEY: true, OPENROUTER_API_KEY: true }, false).id).toBe('openai:text-embedding-3-small');
+    expect(pickRecommended(EXPLAIN_EMBEDDING_ROWS, { ...none, GOOGLE_GENERATIVE_AI_API_KEY: true, OPENROUTER_API_KEY: true }, false).id).toBe('google:gemini-embedding-2');
+    expect(pickRecommended(EXPLAIN_EMBEDDING_ROWS, { ...none, OPENROUTER_API_KEY: true }, /* ollamaReady */ true).id).toBe('ollama:nomic-embed-text');
+  });
+
+  test('no keys → the canonical Voyage setup path (unchanged)', () => {
+    const r = pickRecommended(EXPLAIN_EMBEDDING_ROWS, none, false);
+    expect(r.id).toBe('voyage:voyage-4');
+    expect(r.reason).toContain('No provider env detected');
+  });
+
+  test('a sunsetting provider is never recommended even when its key is the only one', () => {
+    const r = pickRecommended(EXPLAIN_EMBEDDING_ROWS, { ...none, ZEROENTROPY_API_KEY: true }, false);
+    expect(r.id).toBe('voyage:voyage-4');
+  });
+});
 
 describe('envReady', () => {
   test('true when all required env vars set', () => {

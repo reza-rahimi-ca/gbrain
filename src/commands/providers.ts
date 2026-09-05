@@ -6,6 +6,7 @@
  */
 
 import { listRecipes, getRecipe } from '../core/ai/recipes/index.ts';
+import { embeddingDimsForModel } from '../core/ai/model-resolver.ts';
 import { configureGateway, embedOne, isAvailable as gwIsAvailable, chat as gwChat } from '../core/ai/gateway.ts';
 import { buildGatewayConfig } from '../core/ai/build-gateway-config.ts';
 import { probeOllama, probeLMStudio } from '../core/ai/probes.ts';
@@ -19,7 +20,7 @@ const SCHEMA_VERSION = 1;
 
 type TouchpointFilter = 'embedding' | 'expansion' | 'chat';
 
-interface ProviderOption {
+export interface ProviderOption {
   id: string;
   touchpoint: TouchpointFilter;
   model: string;
@@ -215,6 +216,7 @@ TOUCHPOINTS
 EXAMPLES
   gbrain providers list
   gbrain providers test --model openai:text-embedding-3-large
+  gbrain providers test --model openrouter:voyageai/voyage-4
   gbrain providers test --touchpoint chat --model anthropic:claude-haiku-4-5
   gbrain providers test --touchpoint chat --model deepseek:deepseek-v4-flash
   gbrain providers env ollama
@@ -293,7 +295,13 @@ async function runTest(args: string[]): Promise<void> {
     // null on first-time install, matching the old behavior for that case).
     const baseGatewayConfig = cfg ? buildGatewayConfig(cfg) : { env: { ...process.env } };
     if (tpArg === 'embedding') {
-      const dims = recipe?.touchpoints.embedding?.default_dims ?? 1536;
+      // Probe width follows the MODEL, not the recipe-wide default: OpenRouter
+      // declares `default_dims: 0` (mixed-width catalog) and a 0-wide probe
+      // reported "not configured or not ready" for a perfectly good
+      // `openrouter:voyageai/voyage-4`. Per-model `model_dims` first, recipe
+      // default second, 1536 as the last-resort legacy floor.
+      const perModel = recipe ? embeddingDimsForModel(recipe, modelId) : 0;
+      const dims = perModel > 0 ? perModel : (recipe?.touchpoints.embedding?.default_dims || 1536);
       configureGateway({
         ...baseGatewayConfig,
         embedding_model: modelArg,
@@ -305,7 +313,6 @@ async function runTest(args: string[]): Promise<void> {
         chat_model: modelArg,
       });
     }
-    void modelId; // intentionally unused but preserved for readability
   }
 
   if (!gwIsAvailable(tpArg)) {
@@ -370,6 +377,7 @@ async function runExplain(args: string[]): Promise<void> {
     GOOGLE_GENERATIVE_AI_API_KEY: !!process.env.GOOGLE_GENERATIVE_AI_API_KEY,
     ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
     VOYAGE_API_KEY: !!process.env.VOYAGE_API_KEY,
+    OPENROUTER_API_KEY: !!process.env.OPENROUTER_API_KEY,
     DEEPSEEK_API_KEY: !!process.env.DEEPSEEK_API_KEY,
     GROQ_API_KEY: !!process.env.GROQ_API_KEY,
     TOGETHER_API_KEY: !!process.env.TOGETHER_API_KEY,
@@ -389,11 +397,15 @@ async function runExplain(args: string[]): Promise<void> {
       // touchpoint cost tracks models[0], which can differ from the canonical
       // pick (voyage-4 is $0.06/M; the recipe-wide hint reflects the flagship).
       const modelPrice = lookupEmbeddingPrice(`${r.id}:${canonicalModel}`);
+      // Width of the CANONICAL model (per-model `model_dims` first) — the
+      // recipe-wide `default_dims` is 0 for OpenRouter's mixed-width catalog
+      // and would render the row as "—" while a pick actually sizes to 1024.
+      const canonicalDims = embeddingDimsForModel(r, canonicalModel) || m.default_dims;
       options.push({
         id: `${r.id}:${canonicalModel}`,
         touchpoint: 'embedding',
         model: canonicalModel,
-        dims: m.default_dims,
+        dims: canonicalDims,
         cost_per_1m_tokens_usd:
           modelPrice.kind === 'known' ? modelPrice.pricePerMTok : m.cost_per_1m_tokens_usd,
         price_last_verified: m.price_last_verified,
@@ -533,10 +545,15 @@ function consFor(r: Recipe): string[] {
   return out;
 }
 
-function pickRecommended(options: ProviderOption[], env: Record<string, boolean>, ollamaReady: boolean): { id: string; reason: string } {
-  // Embedding recommendation: prefer env-ready providers in canonical order —
-  // Voyage first (the v0.46.3 new-install default: one key covers embedding +
-  // rerank-2.5 + multimodal). Never recommend a sunsetting provider.
+/**
+ * Embedding recommendation for `providers explain`: prefer env-ready providers
+ * in the SAME precedence init's auto-pick uses — Voyage first (the v0.46.3
+ * new-install default: one key covers embedding + rerank-2.5 + multimodal),
+ * OpenAI, local Ollama, Google, then OpenRouter LAST (the sole-key case: it
+ * never beats a native key that is also present). Never recommends a
+ * sunsetting provider. `@internal` exported for tests.
+ */
+export function pickRecommended(options: ProviderOption[], env: Record<string, boolean>, ollamaReady: boolean): { id: string; reason: string } {
   const embOpts = options.filter(o => o.touchpoint === 'embedding' && !o.deprecated);
   if (env.VOYAGE_API_KEY) {
     const voyage = embOpts.find(o => o.id.startsWith('voyage:'));
@@ -553,6 +570,18 @@ function pickRecommended(options: ProviderOption[], env: Record<string, boolean>
   if (env.GOOGLE_GENERATIVE_AI_API_KEY) {
     const google = embOpts.find(o => o.id.startsWith('google:'));
     if (google) return { id: google.id, reason: 'GOOGLE_GENERATIVE_AI_API_KEY set — Gemini embedding at 768 dims.' };
+  }
+  if (env.OPENROUTER_API_KEY) {
+    const openrouter = embOpts.find(o => o.id.startsWith('openrouter:'));
+    if (openrouter) {
+      return {
+        id: openrouter.id,
+        reason:
+          'OPENROUTER_API_KEY set — one key covers everything: voyage-4 embeddings at 1024 dims ' +
+          '(same space as the native default), the rerank-2.5 reranker, and chat/extraction ' +
+          'via openrouter:anthropic/* — no other provider key needed.',
+      };
+    }
   }
   // Nothing ready. Recommend the canonical default as the setup path.
   return {
