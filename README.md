@@ -181,6 +181,8 @@ gbrain think "what do we know about …?"   # synthesized via openrouter:anthrop
 
 **Say to your agent:** *"Set up gbrain with my OpenRouter key for everything"* — your agent exports `OPENROUTER_API_KEY` and runs `gbrain init --pglite`.
 
+To keep the key available to shells that don't inherit your env (launchd, cron, an MCP host), persist it once with `gbrain config set OPENROUTER_API_KEY sk-or-...` — either spelling works, it is stored as `openrouter_api_key` and read back as `***`, and every surface (`providers explain`, `doctor`, `search modes`, init, the model resolver) honors a key that lives only in config.json. init itself writes no model pins: the chat tiers resolve at runtime from whichever key is present.
+
 The embeddings land in the same `voyage-4` space as the native default, so you can move to a direct Voyage key later with no reindex. OpenRouter is the auto-pick only when it is your sole key — a native Voyage, Anthropic or OpenAI key alongside it keeps winning. Details: [`docs/integrations/embedding-providers.md`](docs/integrations/embedding-providers.md) → OpenRouter.
 
 ### Connect GBrain to your AI client (MCP)

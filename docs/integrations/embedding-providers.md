@@ -111,7 +111,7 @@ GCP service-account / Vertex AI auth (Vertex ADC) is not supported; only the AI 
 
 ### OpenRouter
 
-Single OpenAI-compatible API for fan-out to OpenAI, Anthropic, Google, DeepSeek, Voyage, Meta Llama, Qwen, and dozens of other hosted providers. One key, many models. Set `OPENROUTER_API_KEY` or `openrouter_api_key` in `~/.gbrain/config.json`, then use `openrouter:<provider>/<model>` (e.g. `openrouter:openai/gpt-5.2`, `openrouter:anthropic/claude-sonnet-4.6`).
+Single OpenAI-compatible API for fan-out to OpenAI, Anthropic, Google, DeepSeek, Voyage, Meta Llama, Qwen, and dozens of other hosted providers. One key, many models. Set `OPENROUTER_API_KEY` or `openrouter_api_key` in `~/.gbrain/config.json` (`gbrain config set OPENROUTER_API_KEY sk-or-...` accepts either spelling and writes that field), then use `openrouter:<provider>/<model>` (e.g. `openrouter:openai/gpt-5.2`, `openrouter:anthropic/claude-sonnet-4.6`).
 
 **One-key install.** A fresh brain with `OPENROUTER_API_KEY` as its only provider key is fully functional with no other keys and no `models.*` pins:
 
@@ -125,6 +125,8 @@ gbrain think "..."            # synthesized via openrouter:anthropic/claude-sonn
 ```
 
 **Say to your agent:** *"Set up gbrain with my OpenRouter key for everything"* — your agent exports `OPENROUTER_API_KEY` and runs `gbrain init --pglite`; nothing else to configure.
+
+init reads the key from the environment or from `openrouter_api_key` in `~/.gbrain/config.json` and copies it nowhere; it persists only the embedding tuple (`embedding_model` + `embedding_dimensions`, which size the schema) — no `expansion_model` / `chat_model` pin, no `models.*` or `search.reranker.*` row. To make the key available to keyless shells (launchd, cron, an MCP host that does not inherit your env), persist it once: `gbrain config set OPENROUTER_API_KEY sk-or-...` — `config get` / `config show` print it as `***`. `providers explain`, `doctor`, `search modes`, init and the runtime model resolver all read the same fold (env over config.json), so the key counts wherever it lives. **Say to your agent:** *"Save my OpenRouter key in gbrain's config so it works without the env var"* — your agent runs `gbrain config set OPENROUTER_API_KEY sk-or-...`.
 
 Precedence is unchanged when other keys are present: OpenRouter is the auto-pick only when it is the sole key. A native `VOYAGE_API_KEY` alongside it keeps `voyage:voyage-4` + `voyage:rerank-2.5`; a native `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` keeps winning the chat tiers. `gbrain providers explain` recommends OpenRouter last for the same reason.
 
