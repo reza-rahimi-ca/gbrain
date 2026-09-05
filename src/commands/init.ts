@@ -880,19 +880,43 @@ async function resolveEmbeddingByEnv(out: ResolvedAIOptions, nonInteractive: boo
   out.embedding_dimensions = picked.dim;
 }
 
+/** @internal exported for tests — pins the no-persist contract for providers
+ *  with a key-aware tier default (the resolveChatByEnv rule, applied to the
+ *  utility tier). */
 async function resolveExpansionByEnv(out: ResolvedAIOptions): Promise<void> {
-  const ready = await groupReadyByProvider('expansion', await initProviderEnv());
+  const env = await initProviderEnv();
+  const ready = await groupReadyByProvider('expansion', env);
   // Per D10: chat/expansion fall through to gateway default when ambiguous.
   if (ready.length === 1) {
     const r = ready[0].recipe;
     const tp = r.touchpoints.expansion!;
     if (Array.isArray(tp.models) && tp.models.length > 0) {
+      const detectedKey = r.auth_env?.required?.[0] ?? r.id;
+      const { hasKeyAwareTierDefault, resolveTierDefault } = await import('../core/model-config.ts');
+      if (hasKeyAwareTierDefault(r.id)) {
+        // Deliberately does NOT write out.expansion_model: the utility tier
+        // already resolves to this provider at runtime when its key is the
+        // one present (resolveTierDefault), and a persisted pin freezes the
+        // provider choice — stale the moment the user switches keys, and the
+        // source of the "[models] configured expansion_model … has no usable
+        // provider key" warn. Brains that already persisted the pin keep
+        // working unchanged (a servable file pin still wins).
+        const effective = resolveTierDefault('utility', env);
+        const shown = effective.startsWith(`${r.id}:`) ? effective : `${r.id}:${tp.models[0]}`;
+        console.error(
+          `Detected ${detectedKey} env var. Query expansion will use ${shown} ` +
+          `(key-aware default; nothing written to config).`,
+        );
+        return;
+      }
+      // No runtime default for this provider (groq, deepseek, google, …): the
+      // pin is the only way expansion runs on it, so persist it as before.
       out.expansion_model = `${r.id}:${tp.models[0]}`;
-      console.error(`Detected ${r.auth_env?.required?.[0] ?? r.id} env var. Using ${out.expansion_model} for expansion.`);
+      console.error(`Detected ${detectedKey} env var. Using ${out.expansion_model} for expansion.`);
     }
   }
-  // 0 or >1 → silent: gateway default (`anthropic:claude-haiku-4-5-…`) wins
-  // and falls back gracefully at call time when key isn't set.
+  // 0 or >1 → silent: the key-aware tier default wins at runtime and falls
+  // back gracefully at call time when no key is set.
 }
 
 /** @internal exported for tests — pins the no-persist contract (key-aware
