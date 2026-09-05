@@ -10,6 +10,7 @@ import {
 } from '../core/search/embedding-column.ts';
 
 import { redactPgUrl } from '../core/url-redact.ts';
+import { PROVIDER_KEY_ENV_NAMES, fileplaneKeyForProviderEnvName } from '../core/ai/provider-env.ts';
 
 // v0.36.x #892: sensitive config-key allowlist. The `show` path used a
 // loose `.includes('key')` check that also redacts (works); the `set` path
@@ -35,8 +36,10 @@ export function isSensitiveConfigKey(key: string): boolean {
  * A credential carries no such constraint, so the honest fix is to route the
  * write to the plane the consumer actually reads.
  *
- * Keep in sync with the `envFromConfig` mappings in
- * src/core/ai/build-gateway-config.ts.
+ * Derived from `PROVIDER_KEY_ENV_NAMES` (src/core/ai/provider-env.ts) — the
+ * same table `mergedProviderEnv` folds — so a key this command routes to the
+ * file plane is by construction one the runtime reads, and vice versa. The
+ * list itself (`FILE_PLANE_API_KEYS`) sits below with the other plane tables.
  */
 /** Dotted keys that are FILE-plane canonical (nested under a group in
  * ~/.gbrain/config.json) — read by engine-free processes via
@@ -114,18 +117,28 @@ async function restampVisibilityPosture(newRaw: string | null): Promise<void> {
   } catch { /* best-effort — the authoritative DB write already landed */ }
 }
 
-export const FILE_PLANE_API_KEYS: readonly string[] = [
-  'openai_api_key',
-  'anthropic_api_key',
-  'zeroentropy_api_key',
-  'openrouter_api_key',
-  'voyage_api_key',
-  'dashscope_api_key',
-  'litellm_api_key',
-  'together_api_key',
-  'google_api_key',
-  'azure_openai_api_key', // #4031: mergedProviderEnv reads the file plane only
-];
+export const FILE_PLANE_API_KEYS: readonly string[] = Object.keys(PROVIDER_KEY_ENV_NAMES);
+
+/**
+ * `gbrain config set OPENROUTER_API_KEY sk-or-…` — users (and every `export`
+ * line in the docs) know a provider key by its ENV-VAR spelling, while the
+ * file-plane field is the lowercase `openrouter_api_key`. Accept the env
+ * spelling of any provider key as an alias for its canonical field instead of
+ * rejecting it as an unknown key; the write still lands on the field
+ * `mergedProviderEnv` reads, so `set`, `get`, `unset`, `show` and the runtime
+ * all agree. Every other key passes through untouched (config keys are
+ * case-sensitive). Returns the canonical key.
+ */
+export function canonicalConfigKey(key: string): string {
+  return fileplaneKeyForProviderEnvName(key) ?? key;
+}
+
+/** One stderr note when an env-spelled provider key was accepted as an alias. */
+function noteProviderKeyAlias(typed: string, canonical: string): void {
+  if (typed !== canonical) {
+    console.error(`[config] ${typed} is the env-var spelling — stored as ${canonical} (the field the runtime reads).`);
+  }
+}
 
 export function redactConfigValue(key: string, value: string): string {
   // Both scheme spellings — the old local regex only matched postgresql://,
@@ -298,11 +311,12 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       return;
     }
 
-    const key = args[1];
+    const key = canonicalConfigKey(args[1]);
     if (!key) {
       console.error('Usage: gbrain config unset <key> | --pattern <prefix>');
       process.exit(1);
     }
+    noteProviderKeyAlias(args[1], key);
     if (MEMORY_DUAL_PLANE_KEYS.has(key) || key === BRAIN_AUDIENCE_KEY) {
       // Dual-plane delete, mirroring the dual-plane set: file mirror AND the
       // authoritative DB row both go. "Not found" only when neither had it.
@@ -418,8 +432,9 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   // strip it from the positional scan rather than reading args[1] blindly.
   const rawFlag = args.includes('--raw');
   const positionals = args.filter((a) => a !== '--raw');
-  const key = positionals[1];
+  const key = positionals[1] === undefined ? undefined : canonicalConfigKey(positionals[1]);
   const value = positionals[2];
+  if (key !== undefined) noteProviderKeyAlias(positionals[1], key);
 
   if (action === 'get' && key) {
     // #2120: `get` used to read only the DB plane, so a runtime-effective key
