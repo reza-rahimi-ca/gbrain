@@ -117,13 +117,35 @@ export function openaiStaticTierFallback(): Record<ModelTier, string> {
 }
 
 /**
+ * OpenRouter tier defaults — the ONE place to change what an
+ * OPENROUTER_API_KEY-only install routes chat-shaped work to (fact
+ * extraction, enrichment, query expansion, `think`, dream synthesis /
+ * verdict / patterns, the subagent loop). Mirrors TIER_DEFAULTS family-for-
+ * family through OpenRouter's Anthropic route: every id is in the OR recipe's
+ * curated chat list, tool-capable, prompt-cacheable (the recipe's compat fetch
+ * splices `cache_control` onto Anthropic routes), and the subagent tier is in
+ * `OPENROUTER_SUBAGENT_FAMILIES` (anthropic/ has a live abort/retry replay
+ * pin), so `enforceSubagentCapable` classifies it `ok` — no fallback, no
+ * cost warn. Resolved at runtime only; nothing is written to `models.*`.
+ * Pinned by test/model-config.serial.test.ts.
+ */
+export const OPENROUTER_TIER_DEFAULTS: Record<ModelTier, string> = {
+  utility:   'openrouter:anthropic/claude-haiku-4.5',
+  reasoning: 'openrouter:anthropic/claude-sonnet-4.6',
+  deep:      'openrouter:anthropic/claude-opus-4.7',
+  subagent:  'openrouter:anthropic/claude-sonnet-4.6',
+};
+
+/**
  * Key-aware tier defaults. The FIRST entry whose env key is present (merged
  * env: config-file keys folded, env wins, empty strings dropped) supplies the
  * tier default. Anthropic first preserves today's behavior byte-for-byte on
  * every keyed install; OpenAI second makes an OPENAI_API_KEY-only install
  * actually work (fact extraction, expansion, synthesis) instead of routing
- * every default to a provider whose key is absent. No key at all →
- * TIER_DEFAULTS unchanged (keyless installs degrade honestly downstream).
+ * every default to a provider whose key is absent; OpenRouter LAST, so it is
+ * the auto-pick only when it is the sole chat-capable key — a native Anthropic
+ * or OpenAI key alongside it keeps winning. No key at all → TIER_DEFAULTS
+ * unchanged (keyless installs degrade honestly downstream).
  *
  * OpenAI tiers are RESOLVED PER CALL, never pinned: the account-discovered
  * latest (openai-latest.ts cache, refreshed at gateway connect) wins, the
@@ -131,8 +153,9 @@ export function openaiStaticTierFallback(): Record<ModelTier, string> {
  * without prompt caching on OpenAI → enforceSubagentCapable emits the
  * degraded:no_caching cost warn.
  *
- * Adding a provider here needs a curated per-tier model choice — see the
- * TODOS.md follow-up before extending.
+ * Adding a provider here needs a curated per-tier model choice (see
+ * OPENROUTER_TIER_DEFAULTS for the shape) — see the TODOS.md follow-up before
+ * extending.
  */
 /** Account-discovered latest for a tier, else the recipe-ranked static floor. */
 function discoveredOrStaticOpenAITier(tier: ModelTier): string {
@@ -141,12 +164,13 @@ function discoveredOrStaticOpenAITier(tier: ModelTier): string {
 }
 
 export const PROVIDER_TIER_DEFAULTS: ReadonlyArray<{
-  provider: 'anthropic' | 'openai';
+  provider: 'anthropic' | 'openai' | 'openrouter';
   envKey: string;
   tiers: (tier: ModelTier) => string;
 }> = [
   { provider: 'anthropic', envKey: 'ANTHROPIC_API_KEY', tiers: (tier) => TIER_DEFAULTS[tier] },
   { provider: 'openai', envKey: 'OPENAI_API_KEY', tiers: discoveredOrStaticOpenAITier },
+  { provider: 'openrouter', envKey: 'OPENROUTER_API_KEY', tiers: (tier) => OPENROUTER_TIER_DEFAULTS[tier] },
 ];
 
 /** loadConfig, throw-safe (the hasAnthropicKey pattern): unreadable config = env-only. */
