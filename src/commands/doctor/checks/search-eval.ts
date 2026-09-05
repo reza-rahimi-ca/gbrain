@@ -95,8 +95,10 @@ export async function checkSearchMode(engine: BrainEngine): Promise<Check> {
         activeSunset = rerankerSunset(active.reranker_model);
       }
       // Pure bundle for the same mode — `search modes --reset` clears the
-      // per-key overrides but deliberately preserves search.mode.
-      const bundle = resolveSearchMode({ mode: loaded.mode });
+      // per-key overrides but deliberately preserves search.mode. The
+      // key-aware reranker default is part of "the bundle" a reset lands on
+      // (it is not a config row), so it rides along for the redundancy check.
+      const bundle = resolveSearchMode({ mode: loaded.mode, defaultRerankerModel: loaded.defaultRerankerModel });
       if (bundle.reranker_enabled) {
         resetReranker = bundle.reranker_model;
         resetSunset = rerankerSunset(bundle.reranker_model);

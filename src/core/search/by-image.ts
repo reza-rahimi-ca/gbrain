@@ -58,6 +58,7 @@ export async function searchByImage(
   const resolvedMode = resolveSearchMode({
     mode: modeInput.mode,
     overrides: modeInput.overrides,
+    defaultRerankerModel: modeInput.defaultRerankerModel,
   });
 
   const limit = opts.limit ?? resolvedMode.searchLimit;

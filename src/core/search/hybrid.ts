@@ -1280,6 +1280,10 @@ export async function hybridSearch(
     // escalation). Unknown values fall back to the default in resolveSearchMode.
     mode: opts?.mode ?? modeInput.mode,
     overrides: modeInput.overrides,
+    // Key-aware reranker default (OPENROUTER_API_KEY-only brains) — the loader
+    // computed it on the gateway plane; dropping it here would silently rerank
+    // with a model whose key is absent.
+    defaultRerankerModel: modeInput.defaultRerankerModel,
     perCall: {
       intentWeighting: opts?.intentWeighting,
       tokenBudget: opts?.tokenBudget,
@@ -2586,6 +2590,10 @@ export async function hybridSearchCached(
     // server-default-mode cache row.
     mode: opts?.mode ?? modeInputForCache.mode,
     overrides: modeInputForCache.overrides,
+    // Same key-aware reranker default as the live resolver above — it is part
+    // of knobsHash, so a cache row written under one reranker must not be
+    // served to a lookup resolving another.
+    defaultRerankerModel: modeInputForCache.defaultRerankerModel,
     perCall: {
       cache_enabled: opts?.useCache,
       tokenBudget: opts?.tokenBudget,

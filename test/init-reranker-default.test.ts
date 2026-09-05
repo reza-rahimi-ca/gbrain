@@ -109,4 +109,56 @@ describe('writeNewInstallRerankerDefault (v0.48.2)', () => {
       expect(writes).toEqual([]);
     });
   });
+
+  // ---- OPENROUTER_API_KEY-only installs (key-aware bundle default) ----
+
+  async function captureLog<T>(fn: () => Promise<T>): Promise<{ out: T; log: string }> {
+    const orig = console.log;
+    let log = '';
+    console.log = (...a: unknown[]) => { log += a.map(String).join(' ') + '\n'; };
+    try {
+      return { out: await fn(), log };
+    } finally {
+      console.log = orig;
+    }
+  }
+
+  test('OPENROUTER key only + OR embedding pick → NO write; the bundle default resolves to the OR-proxied rerank-2.5 on the same key', async () => {
+    await withEnv({ OPENROUTER_API_KEY: 'sk-or-test', VOYAGE_API_KEY: undefined, GBRAIN_HOME: emptyHome() }, async () => {
+      const { engine, writes } = stubEngine();
+      const { log } = await captureLog(() => writeNewInstallRerankerDefault(engine, 'openrouter:voyageai/voyage-4'));
+      // Pre-fix this wrote `search.reranker.enabled=false` (keyed non-Voyage
+      // install) and the one-key brain silently lost reranking.
+      expect(writes).toEqual([]);
+      expect(log).toContain('Reranker: openrouter:voyageai/rerank-2.5 (mode-bundle default; same OPENROUTER_API_KEY)');
+    });
+  });
+
+  test('OPENROUTER key only + a non-OR embedding pick (openai) → still no write (the default is provider-independent)', async () => {
+    await withEnv({ OPENROUTER_API_KEY: 'sk-or-test', VOYAGE_API_KEY: undefined, GBRAIN_HOME: emptyHome() }, async () => {
+      const { engine, writes } = stubEngine();
+      await quiet(() => writeNewInstallRerankerDefault(engine, 'openai:text-embedding-3-small'));
+      expect(writes).toEqual([]);
+    });
+  });
+
+  test('OPENROUTER + VOYAGE keys → no write, and the summary names the NATIVE default (precedence unchanged)', async () => {
+    await withEnv({ OPENROUTER_API_KEY: 'sk-or-test', VOYAGE_API_KEY: 'pa-test', GBRAIN_HOME: emptyHome() }, async () => {
+      const { engine, writes } = stubEngine();
+      const { log } = await captureLog(() => writeNewInstallRerankerDefault(engine, 'voyage:voyage-4'));
+      expect(writes).toEqual([]);
+      expect(log).toContain('Reranker: voyage:rerank-2.5 (mode-bundle default; same VOYAGE_API_KEY)');
+    });
+  });
+
+  test('an OpenRouter key on the FILE plane only (config.json openrouter_api_key) → no write', async () => {
+    const home = emptyHome();
+    fs.mkdirSync(path.join(home, '.gbrain'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gbrain', 'config.json'), JSON.stringify({ openrouter_api_key: 'sk-or-file' }));
+    await withEnv({ OPENROUTER_API_KEY: undefined, VOYAGE_API_KEY: undefined, GBRAIN_HOME: home }, async () => {
+      const { engine, writes } = stubEngine();
+      await quiet(() => writeNewInstallRerankerDefault(engine, 'openrouter:voyageai/voyage-4'));
+      expect(writes).toEqual([]);
+    });
+  });
 });

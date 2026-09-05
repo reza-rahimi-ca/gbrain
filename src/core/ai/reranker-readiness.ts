@@ -25,7 +25,13 @@
 
 import { getRecipe } from './recipes/index.ts';
 import { parseModelId } from './model-resolver.ts';
-import { DEFAULT_RERANKER_MODEL, rerankerSunset, sunsetDateHasPassed, type RerankerSunset } from './defaults.ts';
+import {
+  DEFAULT_RERANKER_MODEL,
+  OPENROUTER_DEFAULT_RERANKER_MODEL,
+  rerankerSunset,
+  sunsetDateHasPassed,
+  type RerankerSunset,
+} from './defaults.ts';
 
 export interface RerankerReadiness {
   /** The provider:model string that was evaluated. */
@@ -140,10 +146,67 @@ export function describeRerankerFix(r: RerankerReadiness): string | null {
     );
   }
   if (!r.keyPresent && r.requiredKey) {
+    // The bundle default has a key-aware alternate: name it, so an
+    // OpenRouter-only reader learns that one key already covers reranking.
+    const alternate = r.model === DEFAULT_RERANKER_MODEL
+      ? ` or set OPENROUTER_API_KEY (the default then routes rerank-2.5 through OpenRouter as ${OPENROUTER_DEFAULT_RERANKER_MODEL}),`
+      : '';
     return (
-      `${r.requiredKey} not set — export ${r.requiredKey}=… ` +
+      `${r.requiredKey} not set — export ${r.requiredKey}=…${alternate} ` +
       `(or turn reranking off: gbrain config set search.reranker.enabled false)`
     );
   }
   return `reranker ${r.model} is not ready`;
+}
+
+/**
+ * Candidates for the bundle's `reranker_model` slot, in PRECEDENCE order:
+ * the native default first, then the key-aware alternates. The first
+ * candidate that is `ready` for the caller's env wins; none ready → the
+ * native default (fail-open `no_key` at search time, exactly as before).
+ * Adding a provider here needs a live wire-shape pin (see
+ * test/ai/openrouter-voyage-rerank-wire.test.ts) before it can be a default.
+ */
+export const DEFAULT_RERANKER_CANDIDATES: readonly string[] = Object.freeze([
+  DEFAULT_RERANKER_MODEL,
+  OPENROUTER_DEFAULT_RERANKER_MODEL,
+]);
+
+export interface DefaultRerankerResolution {
+  /** The model the bundle default resolves to for this env. */
+  model: string;
+  /** Readiness of `model`. `ready` is false only when NO candidate is ready —
+   *  `model` is then the native default (search fails open with `no_key`). */
+  readiness: RerankerReadiness;
+  /** True when a key-aware alternate (not `DEFAULT_RERANKER_MODEL`) won. */
+  keyAware: boolean;
+}
+
+/**
+ * Key-aware bundle default for the reranker. ONE predicate shared by
+ * `loadSearchModeConfig` (every search, doctor, `gbrain search modes`, cache
+ * key) and init's reranker-default write, so the four surfaces cannot
+ * disagree about which model a brain with no `search.reranker.model` row
+ * actually reranks with:
+ *
+ *   VOYAGE_API_KEY present            → voyage:rerank-2.5          (unchanged)
+ *   only OPENROUTER_API_KEY present   → openrouter:voyageai/rerank-2.5
+ *   both present                      → voyage:rerank-2.5          (native wins)
+ *   neither                           → voyage:rerank-2.5, ready=false (fail-open)
+ *
+ * Pure: env comes from the CALLER (same contract as `rerankerReadiness`);
+ * never reads `process.env`; never throws.
+ */
+export function resolveDefaultRerankerModel(
+  env: Record<string, string | undefined>,
+  opts: RerankerReadinessOpts = {},
+): DefaultRerankerResolution {
+  const primary = rerankerReadiness(DEFAULT_RERANKER_MODEL, env, opts);
+  if (primary.ready) return { model: DEFAULT_RERANKER_MODEL, readiness: primary, keyAware: false };
+  for (const candidate of DEFAULT_RERANKER_CANDIDATES) {
+    if (candidate === DEFAULT_RERANKER_MODEL) continue;
+    const r = rerankerReadiness(candidate, env, opts);
+    if (r.ready) return { model: candidate, readiness: r, keyAware: true };
+  }
+  return { model: DEFAULT_RERANKER_MODEL, readiness: primary, keyAware: false };
 }
