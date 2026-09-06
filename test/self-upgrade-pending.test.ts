@@ -104,6 +104,75 @@ describe('pendingUpgradeVersion', () => {
   });
 });
 
+describe('pendingUpgradeVersion — source-scoped cache (item 9 correction pass, gap #3)', () => {
+  function writeSourceConfig(home: string, source: string): void {
+    mkdirSync(join(home, '.gbrain'), { recursive: true });
+    writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite', self_upgrade: { source } }));
+  }
+
+  test('legacy marker (no source token) + unpinned config → matches, unchanged behavior', async () => {
+    await withHome(() => {
+      writeUpdateCache({ kind: 'upgrade_available', current: '0.42.0', latest: '0.99.0' });
+      expect(pendingUpgradeVersion('0.42.0')).toBe('0.99.0');
+    });
+  });
+
+  test('legacy marker (no source token) + PINNED config → treated as a cache miss, never surfaced', async () => {
+    await withHome((home) => {
+      writeSourceConfig(home, 'reza-rahimi-ca/gbrain#feat/openrouter-only-install');
+      writeUpdateCache({ kind: 'upgrade_available', current: '0.42.0', latest: '0.99.0' });
+      expect(pendingUpgradeVersion('0.42.0')).toBeNull();
+    });
+  });
+
+  test('marker tagged for the SAME pinned source → matches, surfaces the pending upgrade', async () => {
+    await withHome((home) => {
+      writeSourceConfig(home, 'reza-rahimi-ca/gbrain#feat/openrouter-only-install');
+      writeUpdateCache({
+        kind: 'upgrade_available',
+        current: '0.42.0',
+        latest: '0.99.0',
+        source: 'reza-rahimi-ca/gbrain#feat/openrouter-only-install',
+      });
+      expect(pendingUpgradeVersion('0.42.0')).toBe('0.99.0');
+    });
+  });
+
+  test('marker tagged for a DIFFERENT pinned source → cache miss, never surfaced', async () => {
+    await withHome((home) => {
+      writeSourceConfig(home, 'reza-rahimi-ca/gbrain#feat/openrouter-only-install');
+      writeUpdateCache({
+        kind: 'upgrade_available',
+        current: '0.42.0',
+        latest: '0.99.0',
+        source: 'someone-else/gbrain#main',
+      });
+      expect(pendingUpgradeVersion('0.42.0')).toBeNull();
+    });
+  });
+
+  test('marker tagged with a source token, but config reverted to UNPINNED → cache miss (not silently accepted as upstream)', async () => {
+    await withHome(() => {
+      // No config written this time — unpinned/default.
+      writeUpdateCache({
+        kind: 'upgrade_available',
+        current: '0.42.0',
+        latest: '0.99.0',
+        source: 'reza-rahimi-ca/gbrain#feat/openrouter-only-install',
+      });
+      expect(pendingUpgradeVersion('0.42.0')).toBeNull();
+    });
+  });
+
+  test('invalid configured source → cache miss regardless of marker content (fail closed, not a silent accept)', async () => {
+    await withHome((home) => {
+      writeSourceConfig(home, 'https://not/owner/repo');
+      writeUpdateCache({ kind: 'upgrade_available', current: '0.42.0', latest: '0.99.0' });
+      expect(pendingUpgradeVersion('0.42.0')).toBeNull();
+    });
+  });
+});
+
 describe('advisor collectVersion (consumer of the shared predicate)', () => {
   const ctx = (version: string) => ({ version } as unknown as AdvisorContext);
 

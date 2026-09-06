@@ -3,6 +3,7 @@ import { isNewerVersion, isValidVersionString } from '../core/semver.ts';
 import { fetchChangelog, fetchLatestRelease } from './check-update.ts';
 import { detectInstallMethod, runUpgrade } from './upgrade.ts';
 import { writeUpdateCache } from '../core/self-upgrade.ts';
+import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 
 /**
  * `gbrain self-upgrade [--check-only] [--force] [--json]`
@@ -36,17 +37,35 @@ export async function runSelfUpgrade(args: string[]): Promise<void> {
   const json = args.includes('--json');
 
   const result = await fetchLatestRelease();
+
+  // Fail closed: a malformed/unsupported configured `self_upgrade.source`
+  // must never be silently treated as "up to date" (which would mask the
+  // config error and mean this channel quietly stops checking anything).
+  if (!result.ok && result.reason === 'invalid_source') {
+    if (json) {
+      console.log(JSON.stringify({ error: 'invalid_source', error_detail: result.error }, null, 2));
+    } else {
+      console.error(`gbrain self-upgrade: self_upgrade.source is invalid: ${result.error}`);
+      console.error('Fix self_upgrade.source (or unset GBRAIN_SELF_UPGRADE_SOURCE) and retry. No upstream fallback was performed.');
+    }
+    setCliExitVerdict(1);
+    return;
+  }
+
   const release = result.ok ? result : null;
   const latest = release ? release.tag.replace(/^v/, '') : null;
   const behind = !!latest && isValidVersionString(latest) && isNewerVersion(VERSION, latest);
 
-  // Warm the cache so the next invocation's startup hook can emit without a fetch.
+  // Warm the cache so the next invocation's startup hook can emit without a
+  // fetch. Only PINNED sources stamp the marker's source field (item 9
+  // correction pass) — see refreshUpdateCache in check-update.ts for why.
   try {
     if (latest && isValidVersionString(latest)) {
+      const markerSource = release?.pinned ? release.source : undefined;
       writeUpdateCache(
         behind
-          ? { kind: 'upgrade_available', current: VERSION, latest }
-          : { kind: 'up_to_date', current: VERSION },
+          ? { kind: 'upgrade_available', current: VERSION, latest, source: markerSource }
+          : { kind: 'up_to_date', current: VERSION, source: markerSource },
       );
     }
   } catch {

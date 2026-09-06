@@ -57,6 +57,144 @@ action on the user's local sleep window — is owned by
 [quiet-hours.md](quiet-hours.md); this doc only covers the self-upgrade
 hook into it.
 
+### Pinning to a fork/branch (`self_upgrade.source`)
+
+By default every self-upgrade surface — version/release discovery, the
+changelog diff, the Bun package-manager reinstall target, binary release
+assets, and build-provenance/attestation identity — resolves against
+upstream `garrytan/gbrain` on `master`. A fork that wants to stay on its own
+branch (rather than eventually drifting back onto upstream) can pin all of
+that to a specific GitHub `owner/repo` with an optional `#ref`:
+
+```bash
+gbrain config set self_upgrade.source reza-rahimi-ca/gbrain#feat/openrouter-only-install
+```
+
+- **Format:** `owner/repo` or `owner/repo#ref` (a git ref name; branch names
+  containing `/`, like `feat/openrouter-only-install`, work correctly —
+  everything after the first `#` is the ref). Omitting `#ref` defaults to
+  `main` (GitHub's default branch name for new repos) — a fork whose default
+  branch is something else (e.g. `master`) must say so explicitly. `ref` can
+  name either a branch or a tag: the release-asset/changelog/Bun-install
+  surfaces don't care which, and binary provenance verification accepts a
+  build-provenance attestation triggered by either a branch push
+  (`refs/heads/<ref>`) or a tag push (`refs/tags/<ref>`) for that exact ref
+  string — see "Provenance and refs" below.
+- **Type-strict, not just shape-strict.** A non-string `self_upgrade.source`
+  in a hand-edited (or corrupted) `config.json` — a number, object, array,
+  `null` — fails closed with an actionable error instead of crashing or being
+  silently coerced. `GBRAIN_SELF_UPGRADE_SOURCE` set to an empty string
+  (present in the environment but empty) ALSO fails closed rather than
+  silently falling through to the file-plane config — an explicit env
+  override that resolves to "nothing" is far more likely a mistake than a
+  deliberate "ignore the env" signal. A file-plane `self_upgrade.source: ""`
+  is different: that's the documented way to CLEAR a pin
+  (`gbrain config set self_upgrade.source ""`), a deliberate file edit, so it
+  degrades to "nothing configured," not a failure.
+- **Escape hatch:** `GBRAIN_SELF_UPGRADE_SOURCE` env var overrides the
+  file-plane config (same precedence pattern as `self_upgrade.mode`).
+- **Every surface resolves the SAME source:** `gbrain check-update`, `gbrain
+  self-upgrade [--check-only]`, `gbrain upgrade` (the `bun`, `bun-link`,
+  `binary`, and `clawhub` install-method lanes, and the generic
+  "could not detect install method" fallback), and the autopilot silent
+  channel (which shells out to `gbrain upgrade --swap-only`, so it inherits
+  this automatically) — see `src/core/self-upgrade-source.ts`.
+- **Fails closed, never falls back to upstream.** A malformed or unsupported
+  value (a URL instead of `owner/repo`, more than one `#`, an invalid
+  owner/repo/ref segment, a non-string type) is rejected up front: the
+  affected command refuses to fetch or install anything, prints an
+  actionable error, AND exits non-zero — rather than silently
+  checking/fetching upstream `garrytan/gbrain` or exiting 0 as if nothing
+  were wrong. Unset (the default) behaves exactly as before this feature
+  existed, including the exit code (an ordinary network hiccup still exits 0
+  — `gbrain check-update` fails silently on THOSE by design; only a
+  configuration problem is treated as a hard failure).
+- **Missing config file vs. an existing-but-unreadable one are NOT the same
+  failure mode.** `resolveConfiguredSelfUpgradeSource()` treats them
+  differently on purpose:
+  - **No `~/.gbrain/config.json` at all** (a fresh install, or one that has
+    never touched config) is the ordinary unpinned case — resolves to the
+    upstream default exactly as it always has. There is no pin to lose here.
+  - **The file EXISTS but can't be read or isn't valid JSON** (disk
+    corruption, a `chmod`-locked file, a botched hand-edit that leaves
+    truncated/invalid JSON) fails CLOSED instead — it does NOT degrade to
+    "nothing configured." A config file that exists might be hiding a real
+    `self_upgrade.source` pin; silently falling back to the upstream default
+    would un-pin a fork install with no signal to the operator, exactly the
+    failure mode this whole feature exists to prevent. Every self-upgrade
+    surface (check-update, `gbrain self-upgrade`, `gbrain upgrade`'s
+    `bun`/`bun-link`/`binary`/`clawhub` lanes) refuses to fetch or install
+    anything until the file is fixed or removed.
+  - The `GBRAIN_SELF_UPGRADE_SOURCE` env override, when set, is checked
+    FIRST and short-circuits entirely — it never even stats the config file,
+    so a corrupt config never blocks a caller whose pin actually comes from
+    the environment.
+- **Bun installs:** when pinned, `gbrain upgrade` runs `bun add -g
+  github:<owner>/<repo>#<ref>` explicitly (reinstalling from the pinned
+  fork/branch) instead of the ordinary `bun update gbrain`, which re-resolves
+  whatever the local `package.json` dependency spec currently says and could
+  otherwise silently replace a pinned GitHub-branch install with the
+  upstream package.
+- **Bun-link (source-clone dev installs):** detection recognizes a `bun
+  link`ed clone of the PINNED fork (not just upstream `garrytan/gbrain`) by
+  matching the clone's `.git/config` remote against the resolved
+  `owner/repo`. When pinned, `gbrain upgrade` additionally refuses to `git
+  pull` a clone that isn't actually checked out on the pinned ref — a `git
+  pull --ff-only` fast-forwards whatever branch is CURRENTLY checked out
+  from ITS OWN upstream, which may not be the pinned ref, so an unchecked
+  pull could silently track the wrong branch. The unpinned/default case is
+  unchanged (no ref check), so an ordinary upstream dev clone on an
+  arbitrary local branch keeps working as before.
+- **ClawHub installs:** ClawHub has no fork/branch concept — it can only
+  track the published upstream package. When pinned, `gbrain upgrade`
+  refuses to run `clawhub update gbrain` (which would silently install
+  upstream instead) and points at the pinned Bun GitHub target instead.
+- **The generic "could not detect install method" fallback:** when pinned,
+  the printed recovery hint names the pinned Bun target, never a bare `bun
+  update gbrain` / upstream releases URL.
+- **Binary installs:** the atomic binary swap fetches release assets from,
+  and verifies build-provenance/attestation identity against, the pinned
+  `owner/repo`'s own release workflow — never upstream's.
+
+#### Provenance and refs
+
+Binary-install integrity verification checks the downloaded asset's
+build-provenance attestation against an EXPECTED builder id naming this
+project's `.github/workflows/release.yml` on the configured ref. Because
+`self_upgrade.source#ref` accepts any git ref name, and branch/tag names
+share the same character set, the ref string alone can't say which kind it
+is. This project's own `release.yml` only ever triggers on branch pushes
+(pinned by `test/release-workflow.test.ts`); an arbitrary fork's workflow
+could instead trigger on a tag push. Verification therefore accepts EITHER
+`refs/heads/<ref>` or `refs/tags/<ref>` for the configured ref — this does
+not broaden what's trusted (a match still requires the exact owner/repo, the
+exact `release.yml` workflow path, AND the exact ref string; the trigger
+kind is the only thing left open), it just avoids incorrectly rejecting a
+genuine tag-triggered release from a fork whose workflow legitimately uses
+tags.
+
+#### Update-cache is bound to the configured source
+
+The file-plane update-cache marker (`~/.gbrain/last-update-check`, read by
+the CLI startup hook, `gbrain doctor`, the advisor, and `get_brain_identity`,
+and written by `gbrain check-update` / `gbrain self-upgrade`) is bound to the
+`self_upgrade.source` it was resolved against, so a marker written for one
+source can never be silently consumed after the pin changes:
+
+- An ordinary (unpinned) write keeps the EXACT legacy marker shape — no
+  extra token — for maximum backward/forward compatibility with older
+  gbrain binaries reading the same cache file.
+- A PINNED write appends a compact `owner/repo#ref` identity token.
+- A legacy (untagged) marker is valid ONLY when nothing is currently pinned
+  — once a source is pinned, an untagged or mismatched-source entry is
+  treated exactly like a missing cache (re-checked, never acted on), both by
+  the CLI startup notify path and by the autopilot silent channel.
+- A refresh that fails (offline, `invalid_source`, …) never "preserves"
+  (bumps the mtime of) a prior marker written for a DIFFERENT source than
+  the one currently configured — there is no last-known-good data for a
+  newly configured source yet, so the stale foreign-source entry is left
+  untouched rather than kept artificially fresh.
+
 ## Implementation
 
 ### The Check (cron-initiated)
