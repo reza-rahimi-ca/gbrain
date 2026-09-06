@@ -10,10 +10,14 @@
  *     crontab round-trips a state file (`-l` prints it; `crontab <file>`
  *     replaces it), the fake systemctl appends its argv to a recorder file.
  *     The real machine's cron table and systemd are NEVER touched.
- *   - HOME (and XDG_CONFIG_HOME) point at a temp root; GBRAIN_HOME is
- *     deleted so gbrainHomePath() and the raw-$HOME paths autopilot.ts uses
+ *   - HOME (and XDG_CONFIG_HOME) point at a temp root; GBRAIN_HOME is set
+ *     EXPLICITLY to that same temp root (never deleted/inherited) so
+ *     gbrainHomePath() and the raw-$HOME paths autopilot.ts uses
  *     (systemdUnitPath, installCrontab's log path) resolve into the SAME
- *     temp tree.
+ *     temp tree by contract, not by an accidental fallback through
+ *     os.homedir(). assertSafeLifecycleGbrainHome below fails fast if that
+ *     target were ever outside the temp root or inside the real operator
+ *     home.
  *   - No DATABASE_URL / provider keys: `gbrain init --pglite` seeds the
  *     brain `--install` needs (cli.ts connects an engine before dispatching
  *     `autopilot --install`; `--status`/`--uninstall` are engine-free).
@@ -62,11 +66,40 @@ import {
   statSync,
   writeFileSync,
 } from 'fs';
-import { tmpdir } from 'os';
-import { join, resolve } from 'path';
+import { homedir, tmpdir } from 'os';
+import { join, resolve, sep } from 'path';
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 const CLI = join(REPO_ROOT, 'src', 'cli.ts');
+
+/**
+ * Fail-fast guard: refuse to run this destructive lifecycle suite unless the
+ * GBRAIN_HOME we're about to hand the spawned CLI is (a) contained under this
+ * suite's own temp root and (b) nowhere near the real operator's home
+ * directory. Mirrors assertSafeTestGbrainHome in test/autopilot-install.test.ts
+ * (not imported from there: that file's top-level `describe`/`test` calls
+ * would register into this suite on import).
+ */
+function assertSafeLifecycleGbrainHome(candidate: string, tempRoot: string): void {
+  const resolvedCandidate = resolve(candidate);
+  const resolvedTempRoot = resolve(tempRoot);
+  const withinTemp =
+    resolvedCandidate === resolvedTempRoot || resolvedCandidate.startsWith(resolvedTempRoot + sep);
+  if (!withinTemp) {
+    throw new Error(
+      `safety guard: GBRAIN_HOME ("${resolvedCandidate}") is not contained under this ` +
+        `suite's temp root ("${resolvedTempRoot}"). Refusing to run a destructive ` +
+        'autopilot lifecycle test outside a scratch temp dir.',
+    );
+  }
+  const realHome = resolve(homedir());
+  if (resolvedCandidate === realHome || resolvedCandidate.startsWith(realHome + sep)) {
+    throw new Error(
+      `safety guard: GBRAIN_HOME ("${resolvedCandidate}") resolves inside the real operator ` +
+        `home directory ("${realHome}"). Refusing to run.`,
+    );
+  }
+}
 
 let tmpRoot: string;
 let home: string;
@@ -170,17 +203,21 @@ exit 0
   // tests, it just has to resolve deterministically.
   writeShim(join(shimDir, 'gbrain'), '#!/bin/sh\nexit 0\n');
 
+  assertSafeLifecycleGbrainHome(home, tmpRoot);
   runEnv = {
     ...process.env,
     HOME: home,
+    // GBRAIN_HOME is a parent dir (config.ts's configDir() appends '.gbrain'
+    // itself) — set explicitly to the SAME temp root as HOME so
+    // gbrainHomePath() and the raw-$HOME joins autopilot.ts also uses
+    // (systemdUnitPath, installCrontab's log path) resolve into the SAME
+    // temp tree. Explicit and guarded (assertSafeLifecycleGbrainHome above),
+    // not an accidental fallback through a deleted/unset GBRAIN_HOME.
+    GBRAIN_HOME: home,
     XDG_CONFIG_HOME: join(home, '.config'),
     PATH: `${shimDir}:${process.env.PATH ?? ''}`,
     GBRAIN_SKIP_STARTUP_HOOKS: '1',
   };
-  // HOME (not GBRAIN_HOME) must drive path resolution: autopilot.ts mixes
-  // gbrainHomePath() with raw process.env.HOME joins, and the two only agree
-  // when GBRAIN_HOME is unset.
-  delete runEnv.GBRAIN_HOME;
   // Hermetic: no shared Postgres, no provider keys (init's multi-provider
   // ambiguity check refuses when several are ambient).
   delete runEnv.DATABASE_URL;
