@@ -5,6 +5,13 @@ import { basename, join, dirname, resolve } from 'path';
 import { parseSemver, semverGt } from '../core/semver.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { VERSION } from '../version.ts';
+import {
+  DEFAULT_SELF_UPGRADE_SOURCE,
+  bunGithubInstallTarget,
+  releasesWebUrl,
+  repoMarker,
+  resolveConfiguredSelfUpgradeSource,
+} from '../core/self-upgrade-source.ts';
 
 const GBRAIN_GITHUB_REPO = 'garrytan/gbrain';
 
@@ -45,10 +52,66 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   let upgraded = false;
   switch (method) {
     case 'bun-link': {
-      const linkInfo = detectBunLink();
+      // Fail closed BEFORE any git/bun operation on an invalid configured
+      // source — same discipline as the 'bun' and 'binary' lanes.
+      const sourceResult = resolveConfiguredSelfUpgradeSource();
+      if (!sourceResult.ok) {
+        console.error(`Self-upgrade source is invalid: ${sourceResult.error}`);
+        console.error('Fix self_upgrade.source (or unset GBRAIN_SELF_UPGRADE_SOURCE) before retrying. No upgrade was attempted.');
+        recordUpgradeError({
+          phase: 'resolve-source',
+          fromVersion: oldVersion,
+          toVersion: '',
+          error: sourceResult.error,
+          hint: 'Fix self_upgrade.source (see docs/guides/upgrades-auto-update.md) or unset GBRAIN_SELF_UPGRADE_SOURCE.',
+        });
+        setCliExitVerdict(1);
+        break;
+      }
+      const linkInfo = detectBunLink(repoMarker(sourceResult.source));
       if (!linkInfo) {
         console.error('bun-link detected but could not resolve repo root.');
+        setCliExitVerdict(1);
         break;
+      }
+      // Origin (owner/repo) is already confirmed by detectBunLink's match
+      // above. When PINNED, also confirm the clone is actually checked out
+      // on the configured ref before pulling — `git pull --ff-only` fast-
+      // forwards whatever branch is CURRENTLY checked out from ITS OWN
+      // configured upstream, which is not necessarily the pinned ref, so an
+      // unchecked pull here could silently track the wrong branch. The
+      // unpinned/default case is left exactly as before (no ref check) so
+      // ordinary upstream dev clones on an arbitrary local branch keep
+      // working unchanged.
+      if (sourceResult.pinned) {
+        let checkedOutRef: string | null = null;
+        try {
+          checkedOutRef = execFileSync(
+            'git',
+            ['-C', linkInfo.repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD'],
+            { encoding: 'utf-8', timeout: 10_000 },
+          ).trim();
+        } catch {
+          checkedOutRef = null;
+        }
+        if (checkedOutRef !== sourceResult.source.ref) {
+          console.error(
+            `This bun-link clone at ${linkInfo.repoRoot} is checked out on ` +
+              `${checkedOutRef ?? '(unknown — could not run git rev-parse)'}, but self_upgrade.source ` +
+              `pins ${repoMarker(sourceResult.source)}#${sourceResult.source.ref}.`,
+          );
+          console.error('Refusing to pull a ref that does not match the pin. Check out the pinned ref first:');
+          console.error(`  git -C ${linkInfo.repoRoot} checkout ${sourceResult.source.ref}`);
+          recordUpgradeError({
+            phase: 'bun-link',
+            fromVersion: oldVersion,
+            toVersion: '',
+            error: `checked-out ref ${checkedOutRef ?? 'unknown'} does not match pinned ref ${sourceResult.source.ref}`,
+            hint: `git -C ${linkInfo.repoRoot} checkout ${sourceResult.source.ref}`,
+          });
+          setCliExitVerdict(1);
+          break;
+        }
       }
       console.log(`Upgrading bun-link source clone at ${linkInfo.repoRoot}...`);
       try {
@@ -63,14 +126,48 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
     }
 
     case 'bun': {
-      console.log('Upgrading via bun...');
+      // Fail closed BEFORE running anything: a malformed/unsupported
+      // configured source must never fall back to a bare `bun update
+      // gbrain` (which would silently resolve against upstream/whatever
+      // package.json currently says).
+      const sourceResult = resolveConfiguredSelfUpgradeSource();
+      if (!sourceResult.ok) {
+        console.error(`Self-upgrade source is invalid: ${sourceResult.error}`);
+        console.error('Fix self_upgrade.source (or unset GBRAIN_SELF_UPGRADE_SOURCE) before retrying. No upgrade was attempted.');
+        recordUpgradeError({
+          phase: 'resolve-source',
+          fromVersion: oldVersion,
+          toVersion: '',
+          error: sourceResult.error,
+          hint: 'Fix self_upgrade.source (see docs/guides/upgrades-auto-update.md) or unset GBRAIN_SELF_UPGRADE_SOURCE.',
+        });
+        setCliExitVerdict(1);
+        break;
+      }
       const bunGlobalRoot = resolveBunGlobalRoot();
-      try {
-        execFileSync('bun', ['update', 'gbrain'], { cwd: bunGlobalRoot, stdio: 'inherit', timeout: 120_000 });
-        upgraded = true;
-      } catch {
-        console.error('Upgrade failed. Try running manually:');
-        console.error(`  cd ${bunGlobalRoot} && bun update gbrain`);
+      if (sourceResult.pinned) {
+        // A pinned source names its own fork/branch — reinstall from THAT
+        // GitHub target explicitly rather than `bun update gbrain`, which
+        // re-resolves whatever spec is currently recorded and can silently
+        // replace a pinned GitHub-branch install with the upstream package.
+        const target = bunGithubInstallTarget(sourceResult.source);
+        console.log(`Upgrading via bun (pinned source ${repoMarker(sourceResult.source)}#${sourceResult.source.ref})...`);
+        try {
+          execFileSync('bun', ['add', '-g', target], { cwd: bunGlobalRoot, stdio: 'inherit', timeout: 120_000 });
+          upgraded = true;
+        } catch {
+          console.error('Upgrade failed. Try running manually:');
+          console.error(`  cd ${bunGlobalRoot} && bun add -g ${target}`);
+        }
+      } else {
+        console.log('Upgrading via bun...');
+        try {
+          execFileSync('bun', ['update', 'gbrain'], { cwd: bunGlobalRoot, stdio: 'inherit', timeout: 120_000 });
+          upgraded = true;
+        } catch {
+          console.error('Upgrade failed. Try running manually:');
+          console.error(`  cd ${bunGlobalRoot} && bun update gbrain`);
+        }
       }
       break;
     }
@@ -78,15 +175,35 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
     case 'binary': {
       // v0.42: real atomic self-update on the published targets
       // (darwin-arm64, linux-x64). Other platforms have no asset → notify.
+      // `runBinarySelfUpdate` resolves + validates `self_upgrade.source`
+      // itself and fails closed (`reason: 'invalid_source'`) before any
+      // fetch — see src/core/binary-self-update.ts.
       const { runBinarySelfUpdate } = await import('../core/binary-self-update.ts');
       console.log('Updating gbrain binary (atomic download + replace)...');
       const result = await runBinarySelfUpdate();
+      // Only used for the "download manually" hints below, which are only
+      // ever shown once `runBinarySelfUpdate` has already confirmed the
+      // source resolves (any other outcome means result.reason ===
+      // 'invalid_source', handled first).
+      const sourceResult = resolveConfiguredSelfUpgradeSource();
+      const releasesUrl = releasesWebUrl(sourceResult.ok ? sourceResult.source : DEFAULT_SELF_UPGRADE_SOURCE);
       if (result.ok) {
         upgraded = true;
+      } else if (result.reason === 'invalid_source') {
+        console.error(`Self-upgrade source is invalid: ${result.error}`);
+        console.error('Fix self_upgrade.source (or unset GBRAIN_SELF_UPGRADE_SOURCE) before retrying. No download was attempted.');
+        recordUpgradeError({
+          phase: 'binary-self-update',
+          fromVersion: oldVersion,
+          toVersion: '',
+          error: result.error ?? 'invalid_source',
+          hint: 'Fix self_upgrade.source (see docs/guides/upgrades-auto-update.md) or unset GBRAIN_SELF_UPGRADE_SOURCE.',
+        });
+        setCliExitVerdict(1);
       } else if (result.reason === 'unsupported_platform' || result.reason === 'no_asset') {
         console.log('No published binary for this platform/arch.');
         console.log('Download the latest binary from GitHub Releases:');
-        console.log('  https://github.com/garrytan/gbrain/releases');
+        console.log(`  ${releasesUrl}`);
       } else if (
         result.reason === 'integrity_failed' ||
         result.reason === 'integrity_unavailable' ||
@@ -106,7 +223,7 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
         console.error(`Binary self-update rejected — integrity not confirmed: ${detail}.`);
         console.error('Your existing binary is unchanged and the download was discarded.');
         console.error('Retry later, or download + verify manually:');
-        console.error('  https://github.com/garrytan/gbrain/releases');
+        console.error(`  ${releasesUrl}`);
         recordUpgradeError({
           phase: 'binary-self-update',
           fromVersion: oldVersion,
@@ -117,19 +234,55 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
       } else {
         console.error(`Binary self-update failed (${result.reason}${result.error ? `: ${result.error}` : ''}).`);
         console.error('Your existing binary is unchanged. Download manually if needed:');
-        console.error('  https://github.com/garrytan/gbrain/releases');
+        console.error(`  ${releasesUrl}`);
         recordUpgradeError({
           phase: 'binary-self-update',
           fromVersion: oldVersion,
           toVersion: '',
           error: `${result.reason}${result.error ? `: ${result.error}` : ''}`,
-          hint: 'Download from https://github.com/garrytan/gbrain/releases',
+          hint: `Download from ${releasesUrl}`,
         });
       }
       break;
     }
 
-    case 'clawhub':
+    case 'clawhub': {
+      const sourceResult = resolveConfiguredSelfUpgradeSource();
+      if (!sourceResult.ok) {
+        console.error(`Self-upgrade source is invalid: ${sourceResult.error}`);
+        console.error('Fix self_upgrade.source (or unset GBRAIN_SELF_UPGRADE_SOURCE) before retrying. No upgrade was attempted.');
+        recordUpgradeError({
+          phase: 'resolve-source',
+          fromVersion: oldVersion,
+          toVersion: '',
+          error: sourceResult.error,
+          hint: 'Fix self_upgrade.source (see docs/guides/upgrades-auto-update.md) or unset GBRAIN_SELF_UPGRADE_SOURCE.',
+        });
+        setCliExitVerdict(1);
+        break;
+      }
+      if (sourceResult.pinned) {
+        // ClawHub has no fork/branch concept — it can only track the
+        // published upstream package. Running `clawhub update gbrain` here
+        // would silently install upstream instead of the pinned source,
+        // exactly the fallback this feature exists to prevent.
+        const target = bunGithubInstallTarget(sourceResult.source);
+        console.error(
+          `self_upgrade.source is pinned to ${repoMarker(sourceResult.source)}#${sourceResult.source.ref}, ` +
+            'but ClawHub cannot install from a specific fork/branch — it would silently update to upstream instead.',
+        );
+        console.error('Reinstall via the pinned Bun GitHub target instead:');
+        console.error(`  bun add -g ${target}`);
+        recordUpgradeError({
+          phase: 'clawhub-pinned-unsupported',
+          fromVersion: oldVersion,
+          toVersion: '',
+          error: 'clawhub install method cannot honor a pinned self_upgrade.source',
+          hint: `bun add -g ${target}`,
+        });
+        setCliExitVerdict(1);
+        break;
+      }
       console.log('Upgrading via ClawHub...');
       try {
         execSync('clawhub update gbrain', { stdio: 'inherit', timeout: 120_000 });
@@ -138,13 +291,26 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
         console.error('ClawHub upgrade failed. Try: clawhub update gbrain');
       }
       break;
+    }
 
-    default:
+    default: {
+      const sourceResult = resolveConfiguredSelfUpgradeSource();
       console.error('Could not detect installation method.');
-      console.log('Try one of:');
-      console.log('  bun update gbrain');
-      console.log('  clawhub update gbrain');
-      console.log('  Download from https://github.com/garrytan/gbrain/releases');
+      if (!sourceResult.ok) {
+        console.error(`Self-upgrade source is invalid: ${sourceResult.error}`);
+        console.error('Fix self_upgrade.source (or unset GBRAIN_SELF_UPGRADE_SOURCE) before retrying.');
+        setCliExitVerdict(1);
+      } else if (sourceResult.pinned) {
+        console.log(`self_upgrade.source is pinned to ${repoMarker(sourceResult.source)}#${sourceResult.source.ref}. Try:`);
+        console.log(`  bun add -g ${bunGithubInstallTarget(sourceResult.source)}`);
+        setCliExitVerdict(1);
+      } else {
+        console.log('Try one of:');
+        console.log('  bun update gbrain');
+        console.log('  clawhub update gbrain');
+        console.log(`  Download from ${releasesWebUrl(DEFAULT_SELF_UPGRADE_SOURCE)}`);
+      }
+    }
   }
 
   if (upgraded) {
@@ -157,13 +323,20 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
     if (target && assessUpgradeOutcome(target, newVersion) === 'mismatch') {
       console.error(`Upgrade did not take effect: still running ${newVersion}, expected ${target}.`);
       console.error('Exact-tag Git installs stay pinned through `bun update`. Reinstall with:');
-      console.error(`  bun add -g github:garrytan/gbrain#v${target}`);
+      // A pinned fork tracks a BRANCH, not a per-version tag — reinstall from
+      // the configured source's own ref, never upstream's version tag.
+      const mismatchSource = resolveConfiguredSelfUpgradeSource();
+      const reinstallHint =
+        mismatchSource.ok && mismatchSource.pinned
+          ? `bun add -g ${bunGithubInstallTarget(mismatchSource.source)}`
+          : `bun add -g github:garrytan/gbrain#v${target}`;
+      console.error(`  ${reinstallHint}`);
       recordUpgradeError({
         phase: 'verify-target',
         fromVersion: oldVersion,
         toVersion: target,
         error: `still running ${newVersion} after upgrade`,
-        hint: `bun add -g github:garrytan/gbrain#v${target}`,
+        hint: reinstallHint,
       });
       setCliExitVerdict(1);
       return;
@@ -930,7 +1103,20 @@ export function detectInstallMethod(): 'bun' | 'bun-link' | 'binary' | 'clawhub'
   // entry (compiled CLI) OR src/cli.ts directly. Either way, realpath
   // resolves into a directory we can walk up from to find a .git/config
   // pointing at our repo.
-  const bunLinkResult = detectBunLink();
+  //
+  // Source-aware (item 9 correction pass): match against the CONFIGURED
+  // self-upgrade source's owner/repo when one resolves, so a bun-link clone
+  // of a pinned fork is correctly recognized as 'bun-link' instead of
+  // falling through to 'bun'/'unknown'. Falls back to the upstream marker
+  // when no source is configured OR the configured one is invalid —
+  // detection itself never needs to fail closed, because whichever lane
+  // eventually runs (`runUpgrade`'s switch) independently re-resolves and
+  // fails closed before doing anything. This is INTENTIONALLY separate from
+  // `classifyBunInstall`'s npm-squatter heuristic below, which stays pinned
+  // to the real upstream repo regardless of any configured source pin.
+  const sourceForDetection = resolveConfiguredSelfUpgradeSource();
+  const expectedRepoMarker = sourceForDetection.ok ? repoMarker(sourceForDetection.source) : GBRAIN_GITHUB_REPO;
+  const bunLinkResult = detectBunLink(expectedRepoMarker);
   if (bunLinkResult) return 'bun-link';
 
   // Check if running from node_modules (bun/npm install). Could be canonical
@@ -961,10 +1147,72 @@ export function detectInstallMethod(): 'bun' | 'bun-link' | 'binary' | 'clawhub'
 }
 
 /**
+ * Parse a git remote URL into `{owner, repo}` for a GitHub-hosted repo, or
+ * `null` if it isn't a recognized GitHub remote shape (item 9 correction
+ * pass, gap #2 — replaces a whole-file case-insensitive SUBSTRING match,
+ * which a spoofed remote could satisfy as a prefix/suffix/path/query
+ * fragment, e.g. `evil-<owner>/<repo>-fake` or `<owner>/<repo>-mirror`
+ * literally contain `<owner>/<repo>` as a substring without being the same
+ * repo at all). Exact-match only: the ENTIRE url must fully match one of
+ * these shapes, anchored start-to-end.
+ *
+ * Recognized forms (case-insensitive host/owner/repo — GitHub treats both
+ * as case-insensitive):
+ *   - `https://[userinfo@]github.com/OWNER/REPO[.git][/]`  (userinfo covers
+ *     an embedded token, e.g. `https://x-access-token:TOKEN@github.com/...`)
+ *   - `ssh://[user@]github.com[:port]/OWNER/REPO[.git][/]`
+ *   - `git://github.com/OWNER/REPO[.git][/]`
+ *   - `[user@]github.com:OWNER/REPO[.git][/]`               (scp-like syntax)
+ */
+export function parseGithubRemoteOwnerRepo(url: string): { owner: string; repo: string } | null {
+  const trimmed = url.trim();
+  const patterns = [
+    /^https?:\/\/(?:[^@/\s]+@)?(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
+    /^ssh:\/\/(?:[^@/\s]+@)?github\.com(?::\d+)?\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
+    /^git:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
+    /^(?:[^@/\s]+@)?github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
+  ];
+  for (const re of patterns) {
+    const m = trimmed.match(re);
+    if (m) return { owner: m[1]!, repo: m[2]! };
+  }
+  return null;
+}
+
+/**
+ * Extract every `url = ...` value from each `[remote "NAME"]` section of a
+ * raw `.git/config` file's text. Line-oriented INI section tracking (not a
+ * whole-file regex) so a `url =` line outside any `[remote ...]` section —
+ * or a comment, or an unrelated section — is never mistaken for a remote.
+ */
+export function extractGitConfigRemoteUrls(configText: string): string[] {
+  const urls: string[] = [];
+  let inRemoteSection = false;
+  for (const rawLine of configText.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      inRemoteSection = /^remote\s+"/.test(sectionMatch[1]!);
+      continue;
+    }
+    if (!inRemoteSection) continue;
+    const urlMatch = line.match(/^url\s*=\s*(.+)$/);
+    if (urlMatch) urls.push(urlMatch[1]!.trim());
+  }
+  return urls;
+}
+
+/**
  * Detect bun-link source-clone installs (closes #656, fixes #368).
  *
- * Walk up from argv[1] looking for a `.git/config` whose remote url
- * contains `garrytan/gbrain` (case-insensitive substring).
+ * Walk up from argv[1] looking for a `.git/config` with a remote that
+ * parses to EXACTLY `expectedRepoMarker`'s `owner/repo` (case-insensitive;
+ * defaults to upstream `garrytan/gbrain`) — see `parseGithubRemoteOwnerRepo`
+ * / `extractGitConfigRemoteUrls` above (item 9 correction pass, gap #2:
+ * exact remote-URL equivalence, not a substring match over the whole file).
+ * Source-aware: callers pass the CONFIGURED self-upgrade source's
+ * `owner/repo` so a bun-link clone of a pinned fork is recognized too — see
+ * the call site in `detectInstallMethod`.
  *
  * v0.28.5 gated on lstatSync(argv1).isSymbolicLink(), but bun resolves
  * the entire symlink chain before setting process.argv[1], so the check
@@ -975,7 +1223,12 @@ export function detectInstallMethod(): 'bun' | 'bun-link' | 'binary' | 'clawhub'
  * Returns { repoRoot } when confident; null otherwise (caller falls
  * through to the existing detection chain).
  */
-function detectBunLink(): { repoRoot: string } | null {
+function detectBunLink(expectedRepoMarker: string = GBRAIN_GITHUB_REPO): { repoRoot: string } | null {
+  const slashIdx = expectedRepoMarker.indexOf('/');
+  if (slashIdx === -1) return null; // malformed marker — never match
+  const expectedOwner = expectedRepoMarker.slice(0, slashIdx).toLowerCase();
+  const expectedRepo = expectedRepoMarker.slice(slashIdx + 1).toLowerCase();
+
   try {
     const argv1 = process.argv[1];
     if (!argv1) return null;
@@ -986,8 +1239,11 @@ function detectBunLink(): { repoRoot: string } | null {
       if (existsSync(gitConfigPath)) {
         try {
           const cfg = readFileSync(gitConfigPath, 'utf-8');
-          if (cfg.toLowerCase().includes(GBRAIN_GITHUB_REPO.toLowerCase())) {
-            return { repoRoot: dir };
+          for (const url of extractGitConfigRemoteUrls(cfg)) {
+            const parsed = parseGithubRemoteOwnerRepo(url);
+            if (parsed && parsed.owner.toLowerCase() === expectedOwner && parsed.repo.toLowerCase() === expectedRepo) {
+              return { repoRoot: dir };
+            }
           }
         } catch { /* unreadable config — not our case */ }
         return null;

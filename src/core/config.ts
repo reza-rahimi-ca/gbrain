@@ -275,6 +275,18 @@ export interface GBrainConfig {
    */
   self_upgrade?: {
     mode?: 'auto' | 'notify' | 'off';
+    /**
+     * v0.46 fork-pin (item 9): pin every self-upgrade surface (release
+     * discovery, changelog lookup, the Bun reinstall target, binary release
+     * assets, and build-provenance identity) to a specific GitHub
+     * `owner/repo` or `owner/repo#ref` instead of the upstream default
+     * (`garrytan/gbrain#master`). Unset → ordinary upstream behavior,
+     * unchanged. Malformed/unsupported values fail closed (refuse to
+     * fetch/install) rather than silently falling back to upstream. See
+     * `src/core/self-upgrade-source.ts`. Env override:
+     * `GBRAIN_SELF_UPGRADE_SOURCE`.
+     */
+    source?: string;
     /** Set true once the upgrade-time consent prompt has been shown. */
     mode_prompted?: boolean;
     /** Quiet-hours window for the autopilot silent channel. */
@@ -1501,6 +1513,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'skillpack.nag_disabled',
   // Self-upgrade (v0.42; file plane, read on the hot path)
   'self_upgrade.mode',
+  // Fork-pin (item 9): "owner/repo" or "owner/repo#ref". See
+  // src/core/self-upgrade-source.ts.
+  'self_upgrade.source',
   'self_upgrade.mode_prompted',
   'self_upgrade.quiet_hours',
   'self_upgrade.failed_versions',

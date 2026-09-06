@@ -2,22 +2,39 @@
 
 ## Fork-specific defect and feature requests
 
-- [ ] **Item 9, P1: Pin self-upgrade to a configured fork and branch.**
-  This is new scope, separate from the eight defects previously tracked for
-  `feat/openrouter-only-install`. The self-upgrade implementation currently
-  hardcodes `garrytan/gbrain` for release discovery, downloads, changelog
-  lookup, and binary provenance, while Bun's upgrade lane can also replace a
-  GitHub-branch install with the upstream package. Add a file-plane upgrade
-  source setting that can pin this installation to
-  `reza-rahimi-ca/gbrain#feat/openrouter-only-install`. Every upgrade surface,
-  including check-only/notify, explicit `self-upgrade`, autopilot auto mode,
-  package-manager invocation, release assets, and provenance verification,
-  must resolve the same configured source and fail closed rather than falling
-  back silently to upstream. Preserve upstream defaults for ordinary upstream
-  installations. Add tests covering the pinned Bun GitHub install and proving
-  that no `garrytan/gbrain` fetch or install occurs when the fork source is
-  configured. Keep `self_upgrade.mode=off` on this deployment until the source
-  pin is implemented and verified.
+- [x] **Item 9, P1: Pin self-upgrade to a configured fork and branch.** DONE
+  — `src/core/self-upgrade-source.ts` is the single validated
+  `{owner, repo, ref}` resolver (`self_upgrade.source` / `GBRAIN_SELF_UPGRADE_SOURCE`);
+  every self-upgrade surface resolves through it and fails closed on a
+  malformed/unsupported/non-string source, never substituting upstream
+  `garrytan/gbrain`. Covers ALL install-method lanes in `gbrain upgrade`
+  (`bun` → `bun add -g github:<owner>/<repo>#<ref>` when pinned; `bun-link`
+  → source-aware clone detection + refuses to pull a ref that doesn't match
+  the pin; `binary` → release assets + build-provenance/attestation
+  identity resolve the pinned repo; `clawhub` → refuses when pinned, since
+  ClawHub has no fork/branch concept; the generic fallback → never
+  recommends upstream when pinned), plus check-only/notify
+  (`gbrain check-update`), explicit `gbrain self-upgrade`, and the autopilot
+  silent channel (inherits via the shared `gbrain upgrade --swap-only`
+  path). Interactive/apply commands (`gbrain check-update`, `gbrain
+  self-upgrade`, `gbrain upgrade`) set a nonzero CLI exit verdict on an
+  invalid configured source where applicable; the silent/background paths
+  (the detached `check-update --refresh-cache` refresh and the autopilot
+  silent channel) instead refuse/skip the operation with no upstream
+  fallback, without necessarily setting a CLI exit verdict. The file-plane
+  update-cache marker is bound to
+  the source it was resolved against (legacy/untagged markers valid only
+  when unpinned; a refresh failure never preserves a marker from a
+  different source; both the CLI hot-path notify and autopilot auto consume
+  only matching-source cache). `self_upgrade.mode` was left untouched
+  (still whatever this deployment already had it set to). Tests:
+  `test/self-upgrade-source.serial.test.ts`,
+  `test/binary-self-update-source-pin.serial.test.ts`,
+  `test/check-update-source-pin.serial.test.ts`,
+  `test/self-upgrade-explicit-source-pin.serial.test.ts`,
+  `test/upgrade-bun-source-pin.serial.test.ts`,
+  `test/upgrade-clawhub-bunlink-unknown-source-pin.serial.test.ts`,
+  `test/self-upgrade-pending.test.ts`, `test/autopilot-self-upgrade.test.ts`.
 
 ## Verified baseline test failures (filed 2026-09-05)
 

@@ -46,6 +46,15 @@ import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, un
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import {
+  DEFAULT_SELF_UPGRADE_SOURCE,
+  resolveConfiguredSelfUpgradeSource,
+  attestationApiBase,
+  expectedBuilderIdPrefix,
+  expectedBuilderIds as expectedBuilderIdsFor,
+  releasesLatestApiUrl,
+  type SelfUpgradeSource,
+} from './self-upgrade-source.ts';
 
 /**
  * The attestation's builder id must be EXACTLY one of these — it binds the
@@ -55,16 +64,17 @@ import { createHash } from 'node:crypto';
  * If tag-triggered releases ever ship, add their ref form here in the same PR.
  * Mirrors `expectedAssetName`'s coupling to release.yml; pinned by
  * test/release-workflow.test.ts.
+ *
+ * These two constants are the UPSTREAM default (no configured
+ * `self_upgrade.source`) — kept as plain values so existing callers/tests
+ * that assert against the upstream identity keep working unchanged. When a
+ * fork/branch source IS configured (item 9), `runBinarySelfUpdate` resolves
+ * the SAME identifiers per-source via `expectedBuilderIdsFor` /
+ * `attestationApiBase` / `releasesLatestApiUrl` below instead of these
+ * constants — never falls back to them silently.
  */
-export const EXPECTED_BUILDER_ID_PREFIX =
-  'https://github.com/garrytan/gbrain/.github/workflows/release.yml@';
-export const EXPECTED_BUILDER_IDS: readonly string[] = [
-  `${EXPECTED_BUILDER_ID_PREFIX}refs/heads/master`,
-];
-
-/** Base for the GitHub attestation REST endpoint (per-subject-digest lookup). */
-const ATTESTATION_API_BASE =
-  'https://api.github.com/repos/garrytan/gbrain/attestations/sha256:';
+export const EXPECTED_BUILDER_ID_PREFIX = expectedBuilderIdPrefix(DEFAULT_SELF_UPGRADE_SOURCE);
+export const EXPECTED_BUILDER_IDS: readonly string[] = expectedBuilderIdsFor(DEFAULT_SELF_UPGRADE_SOURCE);
 
 export interface ReleaseAsset {
   name: string;
@@ -72,6 +82,7 @@ export interface ReleaseAsset {
 }
 
 export type BinarySelfUpdateReason =
+  | 'invalid_source'
   | 'unsupported_platform'
   | 'fetch_failed'
   | 'no_asset'
@@ -153,9 +164,17 @@ export interface BinarySelfUpdateDeps {
   arch?: NodeJS.Architecture;
 }
 
-async function defaultFetchRelease(): Promise<{ tag: string; assets: ReleaseAsset[] } | null> {
+/**
+ * `source` defaults to the upstream identity. `runBinarySelfUpdate` always
+ * calls this with the RESOLVED (validated) configured source instead —
+ * this default only matters for direct callers (e.g. tests exercising the
+ * default fetch behavior in isolation).
+ */
+async function defaultFetchRelease(
+  source: SelfUpgradeSource = DEFAULT_SELF_UPGRADE_SOURCE,
+): Promise<{ tag: string; assets: ReleaseAsset[] } | null> {
   try {
-    const res = await fetch('https://api.github.com/repos/garrytan/gbrain/releases/latest', {
+    const res = await fetch(releasesLatestApiUrl(source), {
       headers: { 'User-Agent': 'gbrain-self-upgrade' },
       signal: AbortSignal.timeout(5_000),
     });
@@ -244,9 +263,17 @@ export function parseAttestationBundle(bundle: any): ParsedAttestation | null {
   }
 }
 
-export async function defaultFetchAttestation(digest: string): Promise<ParsedAttestation[] | null> {
+/**
+ * `source` defaults to the upstream identity for the same reason as
+ * `defaultFetchRelease` above — `runBinarySelfUpdate` always passes the
+ * resolved configured source explicitly.
+ */
+export async function defaultFetchAttestation(
+  digest: string,
+  source: SelfUpgradeSource = DEFAULT_SELF_UPGRADE_SOURCE,
+): Promise<ParsedAttestation[] | null> {
   try {
-    const res = await fetch(`${ATTESTATION_API_BASE}${digest}`, {
+    const res = await fetch(`${attestationApiBase(source)}${digest}`, {
       headers: { 'User-Agent': 'gbrain-self-upgrade', Accept: 'application/vnd.github+json' },
       signal: AbortSignal.timeout(10_000),
     });
@@ -281,6 +308,13 @@ export async function verifyIntegrity(
   assetName: string,
   computeDigest: (path: string) => string,
   fetchAttestation: (digest: string) => Promise<ParsedAttestation[] | null>,
+  /**
+   * The builder ids that count as "this source's release workflow, on a
+   * trusted ref". Defaults to the upstream identity; `runBinarySelfUpdate`
+   * always passes the resolved configured source's ids explicitly so a
+   * pinned fork verifies against ITS OWN release workflow, not upstream's.
+   */
+  expectedBuilderIds: readonly string[] = EXPECTED_BUILDER_IDS,
 ): Promise<BinarySelfUpdateReason | null> {
   let digest: string;
   try {
@@ -307,7 +341,7 @@ export async function verifyIntegrity(
   // insufficient (a dispatch from an untrusted branch mints a real attestation).
   const verified = attestations.some(
     (att) =>
-      EXPECTED_BUILDER_IDS.includes(att.builderId) &&
+      expectedBuilderIds.includes(att.builderId) &&
       att.subjects.some((s) => s.name === assetName && s.sha256 === digest),
   );
   return verified ? null : 'integrity_failed';
@@ -324,14 +358,27 @@ export async function runBinarySelfUpdate(
   targetPath: string = process.execPath,
   deps: BinarySelfUpdateDeps = {},
 ): Promise<BinarySelfUpdateResult> {
+  // Resolve + validate the configured self-upgrade source FIRST — before any
+  // network call, before even the platform check. A malformed/unsupported
+  // `self_upgrade.source` (or env override) must fail closed here; it must
+  // NEVER silently fall back to fetching/installing upstream `garrytan/gbrain`.
+  const resolvedSource = resolveConfiguredSelfUpgradeSource();
+  if (!resolvedSource.ok) {
+    return { ok: false, reason: 'invalid_source', error: resolvedSource.error };
+  }
+  const source = resolvedSource.source;
+
   const platform = deps.platform ?? process.platform;
   const arch = deps.arch ?? process.arch;
-  const fetchRelease = deps.fetchRelease ?? defaultFetchRelease;
+  const fetchRelease = deps.fetchRelease ?? (() => defaultFetchRelease(source));
   const download = deps.download ?? defaultDownload;
   const smoke = deps.smoke ?? defaultSmoke;
   const checkVersion = deps.checkVersion ?? defaultCheckVersion;
   const computeDigest = deps.computeDigest ?? defaultComputeDigest;
-  const fetchAttestation = deps.fetchAttestation ?? defaultFetchAttestation;
+  const fetchAttestation = deps.fetchAttestation ?? ((digest: string) => defaultFetchAttestation(digest, source));
+  // Provenance identity for THIS source — a pinned fork verifies against its
+  // OWN release workflow, never upstream's, and vice versa.
+  const expectedBuilderIds = expectedBuilderIdsFor(source);
 
   const assetName = expectedAssetName(platform, arch);
   if (!assetName) {
@@ -359,7 +406,7 @@ export async function runBinarySelfUpdate(
 
   // Integrity BEFORE chmod/exec: never make an unverified binary executable and
   // never run its `--version` smoke test. Fail-closed on unavailable or mismatch.
-  const integrityFailure = await verifyIntegrity(staged, assetName, computeDigest, fetchAttestation);
+  const integrityFailure = await verifyIntegrity(staged, assetName, computeDigest, fetchAttestation, expectedBuilderIds);
   if (integrityFailure) {
     safeUnlink(staged);
     return { ok: false, reason: integrityFailure, asset: assetName };

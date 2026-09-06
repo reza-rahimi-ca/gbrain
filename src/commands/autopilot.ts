@@ -40,6 +40,7 @@ import {
   reconcileBreadcrumb,
   resolveSelfUpgradeMode,
 } from '../core/self-upgrade.ts';
+import { resolveConfiguredSelfUpgradeSource, sourceTokenMatchesResolved } from '../core/self-upgrade-source.ts';
 import { logSelfUpgrade } from '../core/audit/self-upgrade-audit.ts';
 import { detectInstallMethod } from './upgrade.ts';
 import { evaluateQuietHours } from '../core/minions/quiet-hours.ts';
@@ -377,9 +378,15 @@ async function attemptAutopilotSelfUpgrade(
     if (!cfg) return;
     if (resolveSelfUpgradeMode(cfg) !== 'auto') return;
 
-    // latestVersion from the shared cache; refresh when stale (TTL throttles fetch).
+    // latestVersion from the shared cache; refresh when stale (TTL throttles
+    // fetch) OR when it doesn't match the CURRENTLY configured self-upgrade
+    // source (item 9 correction pass) — a fresh-by-mtime cache entry for a
+    // DIFFERENT source (e.g. self_upgrade.source changed since it was
+    // written) is exactly as useless as a missing one, so it triggers the
+    // same refresh rather than being silently acted on.
+    const resolvedSource = resolveConfiguredSelfUpgradeSource();
     let entry = readUpdateCache();
-    if (!entry || !isCacheFresh(entry, Date.now())) {
+    if (!entry || !isCacheFresh(entry, Date.now()) || !sourceTokenMatchesResolved(entry.marker.source, resolvedSource)) {
       try {
         const { refreshUpdateCache } = await import('./check-update.ts');
         await refreshUpdateCache();
@@ -389,6 +396,11 @@ async function attemptAutopilotSelfUpgrade(
       }
     }
     if (!entry || entry.marker.kind !== 'upgrade_available' || !entry.marker.latest) return;
+    // Refresh may have failed closed (e.g. invalid_source) or left a
+    // foreign-source entry untouched — re-check after the refresh attempt so
+    // autopilot never acts on a cache entry that isn't for the CURRENT
+    // source, even if the refresh above didn't (or couldn't) fix it up.
+    if (!sourceTokenMatchesResolved(entry.marker.source, resolveConfiguredSelfUpgradeSource())) return;
     const latestVersion = entry.marker.latest;
 
     const idle = await computeAutopilotIdle(engine, engineType);

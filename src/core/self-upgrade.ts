@@ -31,6 +31,11 @@ import { dirname, join } from 'node:path';
 import { gbrainPath } from './config.ts';
 import { acquirePackLock, type PackLockOpts } from './schema-pack/pack-lock.ts';
 import { isNewerVersion, isValidVersionString, parseSemver, semverGt, semverLte } from './semver.ts';
+import {
+  parseSelfUpgradeSourcePin,
+  resolveConfiguredSelfUpgradeSource,
+  sourceTokenMatchesResolved,
+} from './self-upgrade-source.ts';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -106,6 +111,17 @@ export interface UpdateMarker {
   current: string;
   /** Present only when kind === 'upgrade_available'. */
   latest?: string;
+  /**
+   * Identity token (`owner/repo#ref`) of the `self_upgrade.source` this
+   * marker was resolved against — item 9 correction pass. Present ONLY when
+   * the writer's resolved source was PINNED; an ordinary upstream write
+   * omits it (legacy marker shape, max compatibility with older gbrain
+   * binaries reading the same cache file). `undefined` here means either
+   * "written by an unpinned install" or "written before this field
+   * existed" — `sourceTokenMatchesResolved` is the one place that decides
+   * which of those it means for a given reader.
+   */
+  source?: string;
 }
 
 export interface SnoozeRecord {
@@ -203,31 +219,64 @@ export function canSelfUpdate(
 
 // ── Marker grammar (shared by CLI + MCP + agent skill) ───────────────────────
 
-/** Serialize a marker line. The cache file content IS this string. */
+/**
+ * Serialize a marker line. The cache file content IS this string.
+ *
+ * `m.source` (item 9 correction pass) appends a 4th/3rd space-delimited
+ * token — `owner/repo#ref`, which by construction contains no whitespace
+ * (see `REF_RE` in self-upgrade-source.ts) — so it's safe to append without
+ * escaping. Omitted entirely when unset: a legacy-shaped marker (2 or 3
+ * tokens) is exactly what every gbrain binary before this field existed
+ * already writes/reads, so an ordinary (unpinned) install's cache file
+ * never changes shape.
+ */
 export function formatMarker(m: UpdateMarker): string {
+  const suffix = m.source ? ` ${m.source}` : '';
   if (m.kind === 'upgrade_available' && m.latest) {
-    return `UPGRADE_AVAILABLE ${m.current} ${m.latest}`;
+    return `UPGRADE_AVAILABLE ${m.current} ${m.latest}${suffix}`;
   }
-  return `UP_TO_DATE ${m.current}`;
+  return `UP_TO_DATE ${m.current}${suffix}`;
 }
 
 /**
  * Parse a marker line. Strict: both versions must pass the version regex, or we
  * return null. This is the forged-marker guard — a malicious string can't smuggle
  * a non-version token (or a command) into the agent's context as an "upgrade".
+ *
+ * Grammar (item 9 correction pass — backwards compatible):
+ *   UP_TO_DATE <current>                       (legacy, 2 tokens)
+ *   UP_TO_DATE <current> <source>               (3 tokens)
+ *   UPGRADE_AVAILABLE <current> <latest>         (legacy, 3 tokens)
+ *   UPGRADE_AVAILABLE <current> <latest> <source> (4 tokens)
+ * `<source>` must itself parse as a valid `owner/repo#ref` pin (reusing the
+ * same strict parser `self_upgrade.source` uses) — a malformed 4th token
+ * makes the WHOLE line unparseable (fail closed), same as a malformed
+ * version token always has.
  */
 export function parseMarker(line: string): UpdateMarker | null {
   const parts = line.trim().split(/\s+/);
-  if (parts[0] === 'UP_TO_DATE' && parts.length === 2 && isValidVersionString(parts[1])) {
-    return { kind: 'up_to_date', current: parts[1] };
+  if (parts[0] === 'UP_TO_DATE') {
+    if (parts.length === 2 && isValidVersionString(parts[1])) {
+      return { kind: 'up_to_date', current: parts[1] };
+    }
+    if (parts.length === 3 && isValidVersionString(parts[1]) && parseSelfUpgradeSourcePin(parts[2]).ok) {
+      return { kind: 'up_to_date', current: parts[1], source: parts[2] };
+    }
+    return null;
   }
-  if (
-    parts[0] === 'UPGRADE_AVAILABLE' &&
-    parts.length === 3 &&
-    isValidVersionString(parts[1]) &&
-    isValidVersionString(parts[2])
-  ) {
-    return { kind: 'upgrade_available', current: parts[1], latest: parts[2] };
+  if (parts[0] === 'UPGRADE_AVAILABLE') {
+    if (parts.length === 3 && isValidVersionString(parts[1]) && isValidVersionString(parts[2])) {
+      return { kind: 'upgrade_available', current: parts[1], latest: parts[2] };
+    }
+    if (
+      parts.length === 4 &&
+      isValidVersionString(parts[1]) &&
+      isValidVersionString(parts[2]) &&
+      parseSelfUpgradeSourcePin(parts[3]).ok
+    ) {
+      return { kind: 'upgrade_available', current: parts[1], latest: parts[2], source: parts[3] };
+    }
+    return null;
   }
   return null;
 }
@@ -332,6 +381,17 @@ export function isCacheFresh(entry: CacheEntry, now: number): boolean {
  * `marker.current` to describe themselves. Every upgrade-nag surface (CLI
  * startup marker, doctor, advisor, get_brain_identity) routes through here so
  * the suppression rule cannot drift per-surface. Never throws.
+ *
+ * Source-scoped (item 9 correction pass): also requires the marker's source
+ * token to match the CURRENTLY resolved `self_upgrade.source` — a cache
+ * entry written for a DIFFERENT (or no-longer-configured) source is treated
+ * exactly like a missing cache, never surfaced as a pending upgrade. This
+ * adds one extra file-plane config read (`resolveConfiguredSelfUpgradeSource`
+ * → `loadConfigFileOnly`) to the hot-path contract described in the module
+ * header — still a single small synchronous local read, no network, and
+ * `cli.ts` already performs an equivalent read just before calling this
+ * function (for `resolveSelfUpgradeMode`), so this is not a new CLASS of
+ * hot-path I/O, just one more call of the same kind.
  */
 export function pendingUpgradeVersion(runningVersion: string, now: number = Date.now()): string | null {
   try {
@@ -339,6 +399,8 @@ export function pendingUpgradeVersion(runningVersion: string, now: number = Date
     if (!entry || !isCacheFresh(entry, now)) return null;
     if (entry.marker.kind !== 'upgrade_available' || !entry.marker.latest) return null;
     if (!isNewerVersion(runningVersion, entry.marker.latest)) return null;
+    const resolved = resolveConfiguredSelfUpgradeSource();
+    if (!sourceTokenMatchesResolved(entry.marker.source, resolved)) return null;
     return entry.marker.latest;
   } catch {
     return null;
