@@ -18,10 +18,16 @@
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'fs';
 import { spawnSync } from 'child_process';
-import { join } from 'path';
-import { tmpdir } from 'os';
+import { join, resolve, sep } from 'path';
+import { tmpdir, homedir } from 'os';
 
-import { detectInstallTarget, writeWrapperScript, chatBootWarning } from '../src/commands/autopilot.ts';
+import {
+  detectInstallTarget,
+  systemdUserSessionAvailable,
+  writeWrapperScript,
+  chatBootWarning,
+  AUTOPILOT_SYSTEMD_UNIT,
+} from '../src/commands/autopilot.ts';
 import { gbrainPath } from '../src/core/config.ts';
 
 let tmp: string;
@@ -31,12 +37,64 @@ function envKeys() {
   return ['HOME', 'GBRAIN_HOME', 'RENDER', 'RAILWAY_ENVIRONMENT', 'FLY_APP_NAME', 'OPENCLAW_HOME'] as const;
 }
 
+/**
+ * Fail-fast safety guard for this destructive test file. The incident this
+ * guards against: this suite used to `delete process.env.GBRAIN_HOME` in
+ * beforeEach and rely on the `process.env.HOME = tmp` mutation above it to
+ * redirect config.ts's `configDir()` fallback (`homedir()`). Under bun, an
+ * in-process mutation of `process.env.HOME` is NOT reliably observed by
+ * `os.homedir()` later in the same process — so any test that forgot to set
+ * GBRAIN_HOME explicitly (and several here did) silently fell through to the
+ * REAL user's home directory, and writeWrapperScript then wrote
+ * autopilot-run.sh / the env file / permission-checked files into the real
+ * ~/.gbrain.
+ *
+ * Deliberately a pure function over plain strings (no env/fs access) so it
+ * can be exercised with injected inputs in the regression tests below,
+ * independent of whatever this machine's real HOME happens to be.
+ */
+export function assertSafeTestGbrainHome(
+  gbrainHome: string | undefined,
+  opts: { tempRoot?: string; realHome?: string } = {},
+): void {
+  if (!gbrainHome || !gbrainHome.trim()) {
+    throw new Error(
+      'safety guard: GBRAIN_HOME is not set. Every test in this file must set ' +
+        'GBRAIN_HOME to its own scratch temp dir before writeWrapperScript or any ' +
+        'install helper can run — falling back to $HOME/os.homedir() risks writing ' +
+        'into the real user install.',
+    );
+  }
+  const candidate = resolve(gbrainHome.trim());
+  const tempRoot = resolve(opts.tempRoot ?? tmpdir());
+  const withinTemp = candidate === tempRoot || candidate.startsWith(tempRoot + sep);
+  if (!withinTemp) {
+    throw new Error(
+      `safety guard: GBRAIN_HOME ("${candidate}") is not contained under the platform ` +
+        `temp root ("${tempRoot}"). Refusing to run a destructive autopilot-install ` +
+        'test outside a scratch temp dir.',
+    );
+  }
+  const realHome = resolve(opts.realHome ?? homedir());
+  if (candidate === realHome || candidate.startsWith(realHome + sep)) {
+    throw new Error(
+      `safety guard: GBRAIN_HOME ("${candidate}") resolves inside the real user home ` +
+        `directory ("${realHome}"). Refusing to run.`,
+    );
+  }
+}
+
 beforeEach(() => {
   for (const k of envKeys()) envSnapshot[k] = process.env[k];
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-install-test-'));
   process.env.HOME = tmp;
-  // Start each test with a clean slate for ephemeral env vars.
-  delete process.env.GBRAIN_HOME;
+  // Explicitly scope GBRAIN_HOME to this test's fresh temp root BEFORE any
+  // test body can call writeWrapperScript / an install helper. Do NOT delete
+  // GBRAIN_HOME and rely on the HOME mutation above to redirect the fallback
+  // — see assertSafeTestGbrainHome's doc comment for why that is unsafe.
+  process.env.GBRAIN_HOME = tmp;
+  assertSafeTestGbrainHome(process.env.GBRAIN_HOME);
+  // Start each test with a clean slate for the other ephemeral env vars.
   delete process.env.RENDER;
   delete process.env.RAILWAY_ENVIRONMENT;
   delete process.env.FLY_APP_NAME;
@@ -94,9 +152,170 @@ describe('detectInstallTarget', () => {
     expect(detectInstallTarget()).toBe('ephemeral-container');
   });
 
-  // Note: direct testing of linux-systemd / linux-cron requires mocking
-  // existsSync + execSync which is awkward in-process. Those branches are
-  // exercised by the E2E test (Task 14) against a stubbed host.
+  // linux-systemd / linux-cron are also exercised against a real subprocess
+  // by the E2E test (test/e2e/autopilot-linux-lifecycle.serial.test.ts) with
+  // --target forced explicitly. The signal-injected tests below cover
+  // detectInstallTarget's own AUTO-detection branch (no --target), which the
+  // E2E suite cannot reach without touching the real host's systemd/loginctl.
+
+  test('defect 6: prefers an existing systemd user unit over crontab even when is-system-running would fail', () => {
+    if (process.platform === 'darwin') return; // darwin shortcircuits first
+    const unitPath = join(tmp, '.config', 'systemd', 'user', AUTOPILOT_SYSTEMD_UNIT);
+    const target = detectInstallTarget({
+      env: { XDG_RUNTIME_DIR: '/run/user/1000' },
+      fileExists: (p) => p === '/run/systemd/system' || p === unitPath,
+      exec: () => {
+        throw new Error('systemctl --user is-system-running: exit 1 (degraded)');
+      },
+    });
+    expect(target).toBe('linux-systemd');
+  });
+
+  test('defect 6: falls back to linux-cron only when no systemd user session is available at all', () => {
+    if (process.platform === 'darwin') return;
+    let execCalls = 0;
+    const target = detectInstallTarget({
+      env: { USER: 'tester' }, // no XDG_RUNTIME_DIR
+      fileExists: (p) => p === '/run/systemd/system', // no existing unit either
+      exec: (cmd) => {
+        execCalls += 1;
+        if (cmd.startsWith('loginctl')) return 'Linger=no\n';
+        return '';
+      },
+    });
+    expect(target).toBe('linux-cron');
+    // is-system-running must never run once the session probe says unavailable.
+    expect(execCalls).toBe(1);
+  });
+
+  test('defect 6: selects linux-systemd from a reachable session alone, with no existing unit and a failing exec probe', () => {
+    if (process.platform === 'darwin') return;
+    let execCalls = 0;
+    const target = detectInstallTarget({
+      env: { XDG_RUNTIME_DIR: '/run/user/1000' },
+      fileExists: (p) => p === '/run/systemd/system', // no unit yet
+      exec: () => {
+        execCalls += 1;
+        throw new Error('systemctl --user is-system-running: exit 1 (degraded)');
+      },
+    });
+    expect(target).toBe('linux-systemd');
+    // XDG_RUNTIME_DIR alone confirms the session; is-system-running must never run.
+    expect(execCalls).toBe(0);
+  });
+});
+
+describe('systemdUserSessionAvailable (defect 6)', () => {
+  test('true when XDG_RUNTIME_DIR is set, without shelling out at all', () => {
+    let execCalls = 0;
+    const result = systemdUserSessionAvailable({
+      env: { XDG_RUNTIME_DIR: '/run/user/1000' },
+      exec: () => {
+        execCalls += 1;
+        return '';
+      },
+    });
+    expect(result).toBe(true);
+    expect(execCalls).toBe(0);
+  });
+
+  test('true when loginctl reports Linger=yes for the user, no XDG_RUNTIME_DIR', () => {
+    const result = systemdUserSessionAvailable({
+      env: { USER: 'tester' },
+      exec: (cmd) => {
+        expect(cmd).toContain("loginctl show-user 'tester' -p Linger");
+        return 'Linger=yes\n';
+      },
+    });
+    expect(result).toBe(true);
+  });
+
+  test('false when loginctl reports Linger=no', () => {
+    const result = systemdUserSessionAvailable({
+      env: { USER: 'tester' },
+      exec: () => 'Linger=no\n',
+    });
+    expect(result).toBe(false);
+  });
+
+  test('false when there is no USER/LOGNAME to probe and no XDG_RUNTIME_DIR', () => {
+    const result = systemdUserSessionAvailable({ env: {} });
+    expect(result).toBe(false);
+  });
+
+  test('false when the loginctl probe throws (no bus / binary missing)', () => {
+    const result = systemdUserSessionAvailable({
+      env: { USER: 'tester' },
+      exec: () => {
+        throw new Error('loginctl: command not found');
+      },
+    });
+    expect(result).toBe(false);
+  });
+});
+
+// Regression coverage for the fail-fast safety guard above. Pure/injected
+// string inputs only — this must never touch the real filesystem or the
+// real HOME so the "resolves inside the real home directory" branch is
+// actually exercisable without depending on this machine's real user home.
+describe('assertSafeTestGbrainHome (safety guard for this destructive test file)', () => {
+  test('throws when GBRAIN_HOME is undefined', () => {
+    expect(() =>
+      assertSafeTestGbrainHome(undefined, { tempRoot: '/tmp', realHome: '/home/real-user' }),
+    ).toThrow(/GBRAIN_HOME is not set/);
+  });
+
+  test('throws when GBRAIN_HOME is an empty/whitespace string', () => {
+    expect(() =>
+      assertSafeTestGbrainHome('   ', { tempRoot: '/tmp', realHome: '/home/real-user' }),
+    ).toThrow(/GBRAIN_HOME is not set/);
+  });
+
+  test('throws when GBRAIN_HOME is outside the temp root entirely', () => {
+    expect(() =>
+      assertSafeTestGbrainHome('/home/real-user/some-project', {
+        tempRoot: '/tmp',
+        realHome: '/home/other-user',
+      }),
+    ).toThrow(/not contained under the platform temp root/);
+  });
+
+  test('throws when GBRAIN_HOME resolves inside the real home directory, even if nested under an unrelated temp root', () => {
+    expect(() =>
+      assertSafeTestGbrainHome('/tmp/real-home-alias/nested', {
+        tempRoot: '/tmp',
+        realHome: '/tmp/real-home-alias',
+      }),
+    ).toThrow(/resolves inside the real user home directory/);
+  });
+
+  test('throws when GBRAIN_HOME equals the real home directory exactly (even though it is nested under the temp root)', () => {
+    expect(() =>
+      assertSafeTestGbrainHome('/home/real-user', { tempRoot: '/home', realHome: '/home/real-user' }),
+    ).toThrow(/resolves inside the real user home directory/);
+  });
+
+  test('accepts a path safely nested under the temp root, distinct from the real home', () => {
+    expect(() =>
+      assertSafeTestGbrainHome('/tmp/gbrain-install-test-abc123', {
+        tempRoot: '/tmp',
+        realHome: '/home/real-user',
+      }),
+    ).not.toThrow();
+  });
+
+  test('accepts the temp root itself', () => {
+    expect(() =>
+      assertSafeTestGbrainHome('/tmp', { tempRoot: '/tmp', realHome: '/home/real-user' }),
+    ).not.toThrow();
+  });
+
+  test('this file\'s actual beforeEach always leaves a guard-passing GBRAIN_HOME in place', () => {
+    // Real (non-injected) call: proves the wiring in beforeEach above, not
+    // just the pure function in isolation.
+    expect(() => assertSafeTestGbrainHome(process.env.GBRAIN_HOME)).not.toThrow();
+    expect(process.env.GBRAIN_HOME).toBe(tmp);
+  });
 });
 
 // v0.36.1.x (cherry-pick #966): the autopilot wrapper script must source
