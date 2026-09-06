@@ -72,12 +72,44 @@ describe('#2120 — config get resolves file plane with DB fallback', () => {
     expect(errs.join('\n')).toContain('file/env plane');
   });
 
-  test('file plane wins over DB plane (matches runtime precedence) and reports the shadow', async () => {
-    writeFileConfig({ engine: 'pglite', chat_model: 'anthropic:claude-sonnet-4-6' });
-    const { logs, errs } = await runGet({ chat_model: 'openai:gpt-5' }, 'chat_model');
-    expect(logs).toContain('anthropic:claude-sonnet-4-6');
-    expect(logs).not.toContain('openai:gpt-5');
+  test('file plane wins over DB plane for a generic (non-deprecated) key and reports the shadow', async () => {
+    writeFileConfig({ engine: 'pglite', 'search.mode': 'tokenmax' });
+    const { logs, errs } = await runGet({ 'search.mode': 'balanced' }, 'search.mode');
+    expect(logs).toContain('tokenmax');
+    expect(logs).not.toContain('balanced');
     expect(errs.join('\n')).toContain('shadowed');
+  });
+
+  // #defect-1: "chat_model"/"expansion_model" are deprecated compatibility
+  // getters for "models.chat"/"models.expansion" — generic file-first
+  // precedence would let a stale flat file pin shadow the canonical DB
+  // value the gateway actually resolves against. For these two keys only,
+  // the canonical DB value must win when present; the legacy flat file pin
+  // is fallback-only.
+  test('deprecated "chat_model": canonical DB value (models.chat) wins over a stale legacy flat file pin', async () => {
+    writeFileConfig({ engine: 'pglite', chat_model: 'anthropic:claude-sonnet-4-6' });
+    const { logs, errs } = await runGet({ 'models.chat': 'openai:gpt-5' }, 'chat_model');
+    expect(logs).toContain('openai:gpt-5');
+    expect(logs).not.toContain('anthropic:claude-sonnet-4-6');
+    expect(errs.join('\n')).toContain('canonical "models.chat" wins');
+    expect(errs.join('\n')).toContain('ignored/shadowed');
+  });
+
+  test('deprecated "chat_model": legacy flat file pin is fallback-only when no canonical DB value exists', async () => {
+    writeFileConfig({ engine: 'pglite', chat_model: 'anthropic:claude-sonnet-4-6' });
+    const { logs, errs } = await runGet({}, 'chat_model');
+    expect(logs).toContain('anthropic:claude-sonnet-4-6');
+    expect(errs.join('\n')).toContain('legacy flat pin');
+  });
+
+  test('deprecated "chat_model": a stale bare DB row named "chat_model" is inert, not a value', async () => {
+    // Only "models.chat" (the canonical key) is ever read for this getter —
+    // a bare DB row still sitting under the deprecated flat name (e.g. from
+    // a pre-deprecation `config set`) must not be treated as the DB value.
+    writeFileConfig({ engine: 'pglite' });
+    const { errs, exit } = await runGet({ chat_model: 'openai:gpt-5' }, 'chat_model');
+    expect(exit).toBe(1);
+    expect(errs.join('\n')).toContain('Config key not found: chat_model');
   });
 
   test('DB-plane-only key still resolves (no regression for dotted keys)', async () => {

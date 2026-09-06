@@ -52,7 +52,7 @@ import {
   OPENROUTER_CACHE_HEADER,
   openrouterRequiresExplicitPromptCache,
 } from './recipes/openrouter.ts';
-import { resolveModelDetailed, resolveEffectiveChatModel, resolveEffectiveExpansionModel } from '../model-config.ts';
+import { resolveModelDetailed, resolveEffectiveChatModel, resolveEffectiveExpansionModel, migrateDeprecatedModelRoleKeys } from '../model-config.ts';
 import { snapshotConfigReader } from '../config-snapshot.ts';
 import { parseLlmJson } from '../llm-json.ts';
 import type { BrainEngine } from '../engine.ts';
@@ -557,14 +557,14 @@ export async function reconfigureGatewayWithEngine(engine: BrainEngine): Promise
     baseUrl: resolveNativeBaseUrl('openai', cfg),
   });
 
+  // Deprecated flat model-role pins → canonical keys (detail: model-config.ts).
+  await migrateDeprecatedModelRoleKeys(engine);
   // The two resolutions below each walk a 5-tier precedence chain that reads
   // up to 4 config keys, plus alias expansion. Against the engine that is
   // many sequential round trips before the CLI does any work — seconds of
   // `gbrain stats`'s wall clock on a hosted brain, for reads the server
-  // answered in microseconds. Take one snapshot of the config table (AFTER
-  // the discovery refresh above, so tier defaults see fresh discovery) and
-  // resolve every model against it. Same keys, same precedence, one round
-  // trip.
+  // answered in microseconds. Take one snapshot (after the refresh and
+  // migration above) and resolve every model against it: same keys, same precedence, one round trip.
   const reader = await snapshotConfigReader(engine);
 
   // Resolve expansion (utility tier) and chat (reasoning tier). Embedding is

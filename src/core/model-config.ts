@@ -24,12 +24,20 @@ import type { ConfigReader } from './config-snapshot.ts';
 import { openrouterModelSupportsSubagentLoop } from './ai/openrouter-families.ts';
 import { splitProviderModelId } from './model-id.ts';
 import type { GBrainConfig } from './config.ts';
-import { loadConfig } from './config.ts';
+import { loadConfig, loadConfigFileOnly, saveConfig } from './config.ts';
 import { mergedProviderEnv } from './ai/provider-env.ts';
 import { RECIPES } from './ai/recipes/index.ts';
 import { latestOpenAITiers, rankOpenAIChatModels } from './ai/openai-latest.ts';
+import type { ModelTier, ModelRoleFlatKey } from './model-role-keys.ts';
+import { DEPRECATED_MODEL_ROLE_KEYS, MODEL_ROLE_CANONICAL_KEYS } from './model-role-keys.ts';
 
-export type ModelTier = 'utility' | 'reasoning' | 'deep' | 'subagent';
+// Re-exported so existing `import { ModelTier, ... } from './model-config.ts'`
+// call sites (gateway.ts, commands/models.ts, ai/openai-latest.ts) keep
+// working unchanged — the role-key metadata now lives in
+// model-role-keys.ts (defect-1: commands/config.ts needs it without pulling
+// in this file's heavier transitive graph).
+export type { ModelTier, ModelRoleFlatKey };
+export { DEPRECATED_MODEL_ROLE_KEYS, MODEL_ROLE_CANONICAL_KEYS };
 
 export interface ResolveModelOpts {
   /** CLI flag value (e.g. `--model opus` → 'opus'). Highest precedence. */
@@ -323,6 +331,132 @@ export function resolveEffectiveExpansionModel(
   env: Record<string, string | undefined> = process.env,
 ): { model: string; source: EffectiveModelSource } {
   return resolveEffectiveModelForTier('utility', fileCfg?.expansion_model, fileCfg, env);
+}
+
+const _modelRoleMigrationWarningsEmitted = new Set<string>();
+
+/** An engine reference that can read AND write a single config key. Kept
+ *  minimal (not the full BrainEngine type) so this module's only dependency
+ *  on engine shape stays the two methods it actually calls. */
+interface WritableConfigReader {
+  getConfig(key: string): Promise<string | null | undefined>;
+  setConfig(key: string, value: string): Promise<void>;
+}
+
+/**
+ * Delete `flatKey` from ~/.gbrain/config.json if present. Never throws —
+ * the canonical key is already authoritative regardless of whether the
+ * stale flat pin gets cleaned up on this particular run — but unlike a bare
+ * best-effort swallow, the caller learns whether cleanup actually happened
+ * so it can warn instead of silently discarding the failure. `saveConfig`
+ * writes atomically (tmp file + rename), so a load or save failure here
+ * never leaves a half-written file: the flat pin is guaranteed to still be
+ * on disk, exactly as it was, whenever `{ ok: false }` comes back.
+ */
+function removeFlatFileKey(flatKey: ModelRoleFlatKey): { ok: true } | { ok: false; detail: string } {
+  let cfg: Record<string, unknown> | null;
+  try {
+    cfg = loadConfigFileOnly() as Record<string, unknown> | null;
+  } catch (e) {
+    return { ok: false, detail: `could not re-read the config file to remove the old "${flatKey}" pin (${(e as Error).message})` };
+  }
+  if (!cfg || !(flatKey in cfg)) return { ok: true }; // nothing to remove
+  delete cfg[flatKey];
+  try {
+    saveConfig(cfg as unknown as GBrainConfig);
+  } catch (e) {
+    return { ok: false, detail: `could not save the config file after removing the old "${flatKey}" pin (${(e as Error).message})` };
+  }
+  return { ok: true };
+}
+
+/**
+ * One-time-per-brain migration of a flat file-plane model-role pin
+ * (`expansion_model` / `chat_model` in ~/.gbrain/config.json) onto the
+ * canonical DB-plane role key (`models.expansion` / `models.chat`). Called
+ * from `reconfigureGatewayWithEngine` (gateway.ts) on every reconnect, before
+ * either role is resolved — so a stale pin converges on the very reconnect
+ * that would otherwise have read it, with no separate migration command.
+ *
+ * Semantics (never throws — a migration bug must never break reconfigure):
+ *   - no flat pin on disk → no-op.
+ *   - canonical key already set → it already wins at runtime (confirmed by
+ *     the read that checked); the now-redundant flat pin is removed.
+ *   - canonical key absent → the flat pin's exact string is written to the
+ *     canonical key, read back to confirm, THEN the flat pin is removed.
+ *   - a DB read/write/read-back failure at any step → the flat pin is left
+ *     in place (today's working config keeps working) and a warning fires
+ *     once per (flatKey, failure) per process — the same warn-not-fail
+ *     posture as the unservable-pin warn above, never a hard exit.
+ */
+export async function migrateFlatModelRoleKey(
+  engine: WritableConfigReader,
+  flatKey: ModelRoleFlatKey,
+): Promise<void> {
+  const { canonicalKey } = DEPRECATED_MODEL_ROLE_KEYS[flatKey];
+  const warn = (detail: string): void => {
+    const dedupe = `${flatKey}:${detail}`;
+    if (_modelRoleMigrationWarningsEmitted.has(dedupe)) return;
+    _modelRoleMigrationWarningsEmitted.add(dedupe);
+    process.stderr.write(
+      `[models] migrating "${flatKey}" to "${canonicalKey}" failed: ${detail}. ` +
+      `Keeping "${flatKey}" for now — this retries on the next connect, or migrate ` +
+      `manually: gbrain config set ${canonicalKey} <model>\n`,
+    );
+  };
+
+  let fileCfg: GBrainConfig | null;
+  try {
+    fileCfg = loadConfigFileOnly();
+  } catch {
+    return; // unreadable file plane — nothing safe to migrate
+  }
+  const flatPin = fileCfg?.[flatKey];
+  if (typeof flatPin !== 'string' || !flatPin.trim()) return; // nothing to migrate
+
+  let canonicalExisting: string | null | undefined;
+  try {
+    canonicalExisting = await engine.getConfig(canonicalKey);
+  } catch (e) {
+    warn(`could not read ${canonicalKey} (${(e as Error).message})`);
+    return;
+  }
+
+  if (canonicalExisting && canonicalExisting.trim()) {
+    // Canonical already answers at runtime (just confirmed by the read
+    // above) — the flat pin is now dead weight.
+    const cleanup = removeFlatFileKey(flatKey);
+    if (!cleanup.ok) warn(cleanup.detail);
+    return;
+  }
+
+  try {
+    await engine.setConfig(canonicalKey, flatPin);
+    const readBack = await engine.getConfig(canonicalKey);
+    if (readBack !== flatPin) {
+      warn(`wrote it but the read-back value didn't match`);
+      return;
+    }
+  } catch (e) {
+    warn(`the DB write failed (${(e as Error).message})`);
+    return;
+  }
+  const cleanup = removeFlatFileKey(flatKey);
+  if (!cleanup.ok) warn(cleanup.detail);
+}
+
+/**
+ * Both-roles orchestration wrapper for `migrateFlatModelRoleKey` above.
+ * Called from `reconfigureGatewayWithEngine` (gateway.ts) on every reconnect,
+ * BEFORE either role is resolved — so a brain that still has a flat pin
+ * migrates (or sheds it in favor of an already-set canonical key) on this
+ * very reconnect, with no separate migration command. Never throws; each
+ * role migrates independently and a failed one just leaves that flat pin in
+ * place for the fallback layer further down to keep serving.
+ */
+export async function migrateDeprecatedModelRoleKeys(engine: WritableConfigReader): Promise<void> {
+  await migrateFlatModelRoleKey(engine, 'expansion_model');
+  await migrateFlatModelRoleKey(engine, 'chat_model');
 }
 
 /**
@@ -654,4 +788,5 @@ export function _resetDeprecationWarningsForTest(): void {
   _deprecationWarningsEmitted.clear();
   _subagentTierWarningsEmitted.clear();
   _unservablePinWarningsEmitted.clear();
+  _modelRoleMigrationWarningsEmitted.clear();
 }
