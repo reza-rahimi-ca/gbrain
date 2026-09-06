@@ -1,5 +1,24 @@
 # TODOS
 
+## Fork-specific defect and feature requests
+
+- [ ] **Item 9, P1: Pin self-upgrade to a configured fork and branch.**
+  This is new scope, separate from the eight defects previously tracked for
+  `feat/openrouter-only-install`. The self-upgrade implementation currently
+  hardcodes `garrytan/gbrain` for release discovery, downloads, changelog
+  lookup, and binary provenance, while Bun's upgrade lane can also replace a
+  GitHub-branch install with the upstream package. Add a file-plane upgrade
+  source setting that can pin this installation to
+  `reza-rahimi-ca/gbrain#feat/openrouter-only-install`. Every upgrade surface,
+  including check-only/notify, explicit `self-upgrade`, autopilot auto mode,
+  package-manager invocation, release assets, and provenance verification,
+  must resolve the same configured source and fail closed rather than falling
+  back silently to upstream. Preserve upstream defaults for ordinary upstream
+  installations. Add tests covering the pinned Bun GitHub install and proving
+  that no `garrytan/gbrain` fetch or install occurs when the fork source is
+  configured. Keep `self_upgrade.mode=off` on this deployment until the source
+  pin is implemented and verified.
+
 ## Verified baseline test failures (filed 2026-09-05)
 
 - [ ] **P2 — Restore a green full unit suite from baseline `941dc75cd`.**
