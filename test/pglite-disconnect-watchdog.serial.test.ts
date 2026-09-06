@@ -130,17 +130,59 @@ describe('pglite disconnect watchdog vs a wedged event loop (#4284, Bun-pinned)'
     expect(r.sinceArmedMs).toBeGreaterThanOrEqual(WATCHDOG_DEADLINE_MS - 500);
     expect(r.sinceArmedMs).toBeLessThan(11_000);
 
-    // Attribution: the worker's stderr lines carry the label and fire even
-    // while the main thread is starved (worker_threads = separate OS thread).
-    expect(r.stderr).toContain('pglite-disconnect-watchdog');
-    expect(r.stderr).toContain('grace expired');
-
+    // NOTE: we do NOT assert on the worker's in-flight "grace expired" stderr
+    // line here. The worker's process.stderr is proxied through the main
+    // thread's message port; while the main loop is genuinely wedged (the
+    // premise of this whole test), that proxied write can never flush before
+    // the SIGKILL that ends the process — asserting it would pin an
+    // impossible ordering, not a real guarantee. signalCode + timing above
+    // are the race-free proof of the safety contract instead.
+    //
     // ADVISORY (not asserted — OV-4): under starvation the in-loop warn should
     // never appear; a future Bun that services timers under microtask pressure
     // would change this. Logged for the human reading a red-adjacent run.
     if (r.stderr.includes('did not settle')) {
       console.log('[advisory] in-loop close-timeout warn fired under starvation — Bun timer semantics may have changed; re-evaluate #4284 assumptions');
     }
+  }, 90_000);
+
+  test('wedge-no-handler: without a SIGTERM handler, the FIRST stage kills near the deadline, before grace/SIGKILL', async () => {
+    const r = await runFixture('wedge-no-handler', {
+      GBRAIN_PGLITE_CLOSE_TIMEOUT_MS: String(CLOSE_TIMEOUT_MS),
+      GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: String(WATCHDOG_DEADLINE_MS),
+      GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS: String(WATCHDOG_GRACE_MS),
+    }, 12_000);
+
+    // No JS SIGTERM listener is registered in this mode, so the kernel's
+    // default disposition ends the process the instant the watchdog's first
+    // signal arrives — that doesn't need the (wedged) event loop to run at
+    // all. signalCode is the race-free pin (the same reason wedge-watchdog
+    // uses it rather than exitCode alone).
+    expect(r.killedByTest).toBe(false);
+    expect(r.exitCode === 0).toBe(false);
+    expect(r.signalCode).toBe('SIGTERM');
+    expect(r.stdout).not.toContain('DISCONNECTED'); // the wedge never resolves
+
+    // Ordering proof vs. wall-clock allowance are two DIFFERENT claims here,
+    // and only the first is exact:
+    //   - signalCode === 'SIGTERM' (asserted above) is the race-free proof
+    //     that this run died at the FIRST stage, not the SIGKILL/grace stage
+    //     — a SIGKILL would prove the opposite regardless of timing.
+    //   - sinceArmedMs is measured from the harness's ARMED stdout marker,
+    //     which prints BEFORE `engine.disconnect()` is even called — i.e.
+    //     before `installProcessWatchdog` spawns its worker_threads Worker.
+    //     Cold worker_threads startup has been measured adding ~2s on a
+    //     loaded box, so the window between ARMED and the watchdog actually
+    //     being armed is itself part of what sinceArmedMs measures. A bound
+    //     of deadline+grace-100 (5,500ms) has no margin for that startup
+    //     cost and can flake even on a run that is unambiguously correct
+    //     (proven by signalCode alone). Reuse wedge-watchdog's measured
+    //     11s upper allowance instead of a tighter arithmetic bound — this
+    //     is an upper allowance for worker startup jitter, not a widened
+    //     product timeout (WATCHDOG_DEADLINE_MS/GRACE_MS are unchanged).
+    expect(expectedFloor(r.stdout)).toBe(WATCHDOG_DEADLINE_MS);
+    expect(r.sinceArmedMs).toBeGreaterThanOrEqual(WATCHDOG_DEADLINE_MS - 500);
+    expect(r.sinceArmedMs).toBeLessThan(11_000);
   }, 90_000);
 
   test('wedge-control: WITHOUT the watchdog, nothing in-process fires — the #4284 regression pin', async () => {

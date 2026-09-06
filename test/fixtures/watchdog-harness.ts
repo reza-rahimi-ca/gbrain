@@ -14,16 +14,30 @@
  *                    disposition can't kill us — mirrors serve-http, whose
  *                    process-cleanup SIGTERM handler can't run when the loop
  *                    is starved), install the stall watchdog, starve forever.
- *                    The watchdog must SIGTERM at ~stall, then SIGKILL at
- *                    ~stall+grace.
+ *                    The watchdog must SIGTERM at ~stall (unobservable — the
+ *                    listener never runs on a starved loop), then SIGKILL at
+ *                    ~stall+grace, which is what actually ends the process.
+ *   stall-no-handler — same as stall-with, WITHOUT the SIGTERM listener. The
+ *                    kernel's default SIGTERM disposition doesn't need the
+ *                    (starved) event loop to run, so THIS process must die at
+ *                    the watchdog's FIRST stage (SIGTERM near the stall
+ *                    threshold), never reaching the SIGKILL/grace stage — the
+ *                    mirror-image proof to stall-with's SIGKILL backstop.
  *   stall-healthy  — install the stall watchdog and stay HEALTHY (idle loop,
  *                    pets flowing) well past stall+grace. Neither signal may
  *                    fire; a false SIGTERM prints TERMED and exits 1.
  *   stall-dispose  — install, dispose immediately, then genuinely starve past
  *                    stall+grace. A disposed watchdog must never kill.
  *
+ * Both stall-with and stall-no-handler print an ARMED marker (via
+ * fs.writeSync, not a stream write — a stream write is itself a yield point
+ * and would perturb the starvation under test) right before starving, so the
+ * parent can measure kill timing relative to the marker rather than to
+ * process spawn (which includes unpredictable Bun/worker boot time).
+ *
  * Safety net: the busy loop self-exits after 8s so a failed test kill can't hang CI.
  */
+import { writeSync } from 'node:fs';
 import { installProcessWatchdog, installLoopStallWatchdog } from '../../src/core/process-watchdog.ts';
 
 const mode = process.argv[2] ?? 'starve-with';
@@ -65,11 +79,16 @@ if (mode.startsWith('stall-')) {
   // stall-with: the listener's mere presence stops the OS default SIGTERM
   // disposition from killing us; the JS callback itself can never run while
   // the loop is starved (the #1633 premise), so death must come from SIGKILL.
-  process.on('SIGTERM', () => { /* starved loop never runs this */ });
+  // stall-no-handler: no listener registered — the kernel's default SIGTERM
+  // disposition kills us at the watchdog's first stage instead.
+  if (mode === 'stall-with') {
+    process.on('SIGTERM', () => { /* starved loop never runs this */ });
+  }
   installStall();
+  writeSync(1, 'ARMED\n');
   const t0 = Date.now();
   while (Date.now() - t0 < 8000) { /* spin — no await, no yield */ }
-  process.stdout.write('SURVIVED\n'); // must NOT print under stall-with
+  process.stdout.write('SURVIVED\n'); // must NOT print under stall-with/stall-no-handler
   process.exit(0);
 }
 
