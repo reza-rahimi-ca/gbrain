@@ -11,6 +11,14 @@ import {
 
 import { redactPgUrl } from '../core/url-redact.ts';
 import { PROVIDER_KEY_ENV_NAMES, fileplaneKeyForProviderEnvName } from '../core/ai/provider-env.ts';
+// Dependency-free metadata only — NOT model-config.ts. model-config.ts pulls
+// in config.ts (and config.ts's own graph), so a static import of it here
+// would put commands/config.ts and model-config.ts in the same module-init
+// chain as config.ts from two directions (defect-1). model-role-keys.ts has
+// no such edge. The resolver functions this file also needs
+// (resolveModelDetailed/resolveAlias) are imported dynamically at their one
+// call site below, after normal module init — see the comment there.
+import { DEPRECATED_MODEL_ROLE_KEYS, MODEL_ROLE_CANONICAL_KEYS } from '../core/model-role-keys.ts';
 
 // v0.36.x #892: sensitive config-key allowlist. The `show` path used a
 // loose `.includes('key')` check that also redacts (works); the `set` path
@@ -317,6 +325,41 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       process.exit(1);
     }
     noteProviderKeyAlias(args[1], key);
+    if (key in DEPRECATED_MODEL_ROLE_KEYS) {
+      // v0.46.x: "expansion_model"/"chat_model" are deprecated in favor of
+      // "models.expansion"/"models.chat" — the runtime migration
+      // (migrateFlatModelRoleKey, called from reconfigureGatewayWithEngine)
+      // already converges any file-plane pin onto the canonical key on the
+      // next connect. This unset only cleans up whatever is LEFT of the
+      // deprecated name in either plane (a stale bare DB row from a pre-
+      // deprecation `config set`, or a flat pin the migration hasn't run
+      // against yet) — it never touches the canonical key.
+      const { canonicalKey } = DEPRECATED_MODEL_ROLE_KEYS[key];
+      let dbDeleted = 0;
+      try {
+        dbDeleted = await engine.unsetConfig(key);
+      } catch (e) {
+        console.error(`[config] ERROR: the DB-plane delete of "${key}" failed (${e instanceof Error ? e.message : String(e)}).`);
+        process.exit(1);
+      }
+      const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
+      const cfg = loadConfigFileOnly() as Record<string, unknown> | null;
+      let fileHad = false;
+      if (cfg && key in cfg) {
+        delete cfg[key];
+        saveConfig(cfg as unknown as Parameters<typeof saveConfig>[0]);
+        fileHad = true;
+      }
+      if (fileHad || dbDeleted > 0) {
+        console.log(`Unset ${key} (${[fileHad ? 'file plane' : null, dbDeleted > 0 ? 'db plane' : null].filter(Boolean).join(' + ')})`);
+      } else {
+        console.error(`Config key not found: ${key}`);
+      }
+      console.error(`[config] "${key}" is deprecated — the canonical key is "${canonicalKey}". ` +
+        `To control the effective model: gbrain config set ${canonicalKey} <model>`);
+      if (!fileHad && dbDeleted === 0) process.exit(1);
+      return;
+    }
     if (MEMORY_DUAL_PLANE_KEYS.has(key) || key === BRAIN_AUDIENCE_KEY) {
       // Dual-plane delete, mirroring the dual-plane set: file mirror AND the
       // authoritative DB row both go. "Not found" only when neither had it.
@@ -437,6 +480,10 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   if (key !== undefined) noteProviderKeyAlias(positionals[1], key);
 
   if (action === 'get' && key) {
+    const deprecatedRole = key in DEPRECATED_MODEL_ROLE_KEYS ? DEPRECATED_MODEL_ROLE_KEYS[key] : undefined;
+    if (deprecatedRole) {
+      console.error(`[config] "${key}" is deprecated — the canonical key is "${deprecatedRole.canonicalKey}" (gbrain config get ${deprecatedRole.canonicalKey}).`);
+    }
     // #2120: `get` used to read only the DB plane, so a runtime-effective key
     // in ~/.gbrain/config.json (or env) reported not-found. Resolve the way
     // the runtime does — env/file plane wins over DB (loadConfig() already
@@ -451,7 +498,17 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       return k.split('.').reduce<unknown>((acc, seg) => (acc && typeof acc === 'object' ? (acc as Record<string, unknown>)[seg] : undefined), obj);
     };
     const fileVal = resolveDotted(filePlane, key);
-    const dbVal = await engine.getConfig(key);
+    // Deprecated flat model-role keys are a compatibility alias for their
+    // canonical DB-plane key, not a second key of their own: migration never
+    // writes a DB row under the flat name, so a bare `engine.getConfig(key)`
+    // would always miss once the flat file pin is gone — reporting
+    // "Config key not found" even though `models.chat`/`models.expansion`
+    // answers. Reading the canonical key here makes `get chat_model` behave
+    // like `get models.chat` (plus the deprecation notice above), and a stale
+    // bare DB row still sitting under the flat name (from a pre-deprecation
+    // `config set`) is never read as a value — only the canonical key is.
+    const dbReadKey = deprecatedRole ? deprecatedRole.canonicalKey : key;
+    const dbVal = await engine.getConfig(dbReadKey);
     // Dual-plane ambient-writeback keys are DB-AUTHORITATIVE at runtime
     // (adversarial review, this wave): reporting the file mirror here after
     // a failed dual-write would show 'off' while every runtime surface still
@@ -459,9 +516,19 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     // non-zero exit exists to prevent. Everything else keeps the #2120
     // file/env-wins resolution.
     const dbAuthoritative = MEMORY_DUAL_PLANE_KEYS.has(key) || key === BRAIN_AUDIENCE_KEY;
+    // Deprecated flat model-role keys invert the generic file-wins rule: the
+    // canonical DB key (models.chat/models.expansion) is what the gateway
+    // actually resolves against (resolveModelDetailed reads the DB plane
+    // first for these tiers), so it must win here too — otherwise `config
+    // get chat_model` can report a value the runtime has already stopped
+    // using, recreating the exact shadowing defect the deprecation was
+    // meant to surface, not hide. The legacy flat file pin is fallback-only,
+    // read when the canonical key is absent/unreadable.
     const val = dbAuthoritative
       ? (dbVal ?? fileVal)
-      : (fileVal !== undefined && fileVal !== null ? fileVal : dbVal);
+      : deprecatedRole
+        ? (dbVal !== null && dbVal !== undefined ? dbVal : fileVal)
+        : (fileVal !== undefined && fileVal !== null ? fileVal : dbVal);
     if (val !== null && val !== undefined) {
       // #3943: redact by default like `show`/`set` — `get` output lands in
       // agent transcripts and shell history; scripts opt out with the flag.
@@ -471,6 +538,15 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
         console.error(`[config] source: ${dbVal !== null && dbVal !== undefined ? 'db plane (authoritative for this key)' : 'file mirror (no DB row)'}`);
         if (dbVal !== null && dbVal !== undefined && fileVal !== undefined && fileVal !== null && String(fileVal) !== String(dbVal)) {
           console.error(`[config] WARN: file mirror disagrees ('${String(fileVal)}') — planes diverged; re-run: gbrain config set ${key} ${String(dbVal)}`);
+        }
+      } else if (deprecatedRole) {
+        if (dbVal !== null && dbVal !== undefined) {
+          console.error(`[config] source: db plane (canonical "${deprecatedRole.canonicalKey}" wins over the deprecated flat key)`);
+          if (fileVal !== undefined && fileVal !== null && String(fileVal) !== String(dbVal)) {
+            console.error(`[config] NOTE: a legacy "${key}" pin also exists in ~/.gbrain/config.json ('${String(fileVal)}') and is ignored/shadowed at runtime by the canonical value.`);
+          }
+        } else {
+          console.error(`[config] source: file/env plane (~/.gbrain/config.json or env) — legacy flat pin (no canonical "${deprecatedRole.canonicalKey}" value present)`);
         }
       } else if (fileVal !== undefined && fileVal !== null) {
         const shadow = dbVal !== null && dbVal !== undefined
@@ -507,6 +583,68 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       process.exit(1);
     }
     const value = tail.find(a => !a.startsWith('-')) ?? args[2];
+
+    // v0.46.x: "expansion_model"/"chat_model" are deprecated — the canonical
+    // key is "models.expansion"/"models.chat" (DB plane, resolved through
+    // resolveModelDetailed same as every other tier). No --force escape:
+    // the old fall-through wrote an inert bare DB row (never read by the
+    // gateway's raw-file-plane fallback, see reconfigureGatewayWithEngine),
+    // so keeping it would preserve exactly the silent-no-op bug class the
+    // v0.37.11.0 embedding_model refusal above already closed for schema-
+    // sizing fields.
+    if (key in DEPRECATED_MODEL_ROLE_KEYS) {
+      const { canonicalKey } = DEPRECATED_MODEL_ROLE_KEYS[key];
+      console.error(`[config] "${key}" is deprecated — set the canonical key instead:`);
+      console.error(`[config]   gbrain config set ${canonicalKey} ${value}`);
+      console.error(`[config] Nothing was written. (A "${key}" pin already in ~/.gbrain/config.json migrates to ` +
+        `"${canonicalKey}" automatically on the next connect.)`);
+      process.exit(1);
+    }
+
+    // v0.46.x: "models.expansion"/"models.chat" writes are verified before
+    // printing success — write the canonical key, then read it back through
+    // the SAME resolver (resolveModelDetailed) reconfigureGatewayWithEngine
+    // uses, so a false "Set" is impossible: if the effective model isn't the
+    // one just written (DB unreachable, a higher-precedence override already
+    // winning, alias normalization producing something unexpected), this
+    // exits non-zero instead of lying.
+    if (key in MODEL_ROLE_CANONICAL_KEYS) {
+      const { tier } = MODEL_ROLE_CANONICAL_KEYS[key];
+      try {
+        await engine.setConfig(key, value);
+      } catch (e) {
+        console.error(`[config] ERROR: the DB-plane write to "${key}" failed (${e instanceof Error ? e.message : String(e)}).`);
+        console.error(`[config] Nothing is confirmed set — re-run once the database is reachable.`);
+        process.exit(1);
+      }
+      // Dynamic import, not a top-of-file static one (defect-1): this is the
+      // ONLY place in this file that needs the real resolver, and by now
+      // normal module initialization has already completed — the engine
+      // connected, args parsed, the write above already happened. Importing
+      // model-config.ts here can't create an init-order hazard the way a
+      // static import would (model-config.ts statically imports config.ts;
+      // commands/config.ts is loaded very early by cli.ts). Don't duplicate
+      // resolver semantics inline — this defers to the SAME resolver
+      // reconfigureGatewayWithEngine uses, so verification here and runtime
+      // resolution can't drift apart.
+      const { resolveModelDetailed, resolveAlias } = await import('../core/model-config.ts');
+      let detail: { model: string; source: string };
+      try {
+        detail = await resolveModelDetailed(engine, { configKey: key, tier, fallback: value });
+      } catch (e) {
+        console.error(`[config] ERROR: "${key}" was written but the read-back resolution failed (${e instanceof Error ? e.message : String(e)}).`);
+        process.exit(1);
+      }
+      const expected = await resolveAlias(engine, value.trim());
+      if (detail.source !== 'config_key' || detail.model !== expected) {
+        console.error(`[config] ERROR: "${key}" was written but did not verify — the effective model resolves to ` +
+          `"${detail.model}" (via ${detail.source}), not the intended "${expected}".`);
+        console.error(`[config] Nothing is confirmed set — check the database is reachable and re-run.`);
+        process.exit(1);
+      }
+      console.log(`Set ${key} = ${redactConfigValue(key, value)} (verified: effective model resolves to "${detail.model}")`);
+      return;
+    }
 
     // Bootstrap hook-lane keys are FILE-plane canonical: they are read by
     // engine-free processes (the harness hook children and the detached
