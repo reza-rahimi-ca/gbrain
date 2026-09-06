@@ -62,6 +62,78 @@ describe('pickRecommended (providers explain) — same precedence as init auto-p
   });
 });
 
+describe('pickRecommended — never steer away from a healthy, explicitly configured provider', () => {
+  const none = { OPENAI_API_KEY: false, GOOGLE_GENERATIVE_AI_API_KEY: false, ANTHROPIC_API_KEY: false, VOYAGE_API_KEY: false, OPENROUTER_API_KEY: false };
+
+  test('defect 2: configured + healthy OpenRouter beats a locally-detected Ollama', () => {
+    const r = pickRecommended(
+      EXPLAIN_EMBEDDING_ROWS,
+      { ...none, OPENROUTER_API_KEY: true },
+      /* ollamaReady */ true,
+      /* configured embedding_model */ 'openrouter:voyageai/voyage-4',
+    );
+    expect(r.id).toBe('openrouter:voyageai/voyage-4');
+    expect(r.reason.toLowerCase()).toContain('already configured');
+  });
+
+  test('configured but UNHEALTHY (key missing) falls through to the normal precedence', () => {
+    // embedding_model pins openai, but OPENAI_API_KEY is not set — openai's
+    // row is not env_ready, so the pin must not block the fallback pick.
+    const rowsWithUnhealthyOpenai = EXPLAIN_EMBEDDING_ROWS.map(o =>
+      o.id === 'openai:text-embedding-3-small' ? { ...o, env_ready: false } : o,
+    );
+    const r = pickRecommended(
+      rowsWithUnhealthyOpenai,
+      { ...none, OPENROUTER_API_KEY: true },
+      /* ollamaReady */ true,
+      /* configured embedding_model */ 'openai:text-embedding-3-small',
+    );
+    expect(r.id).toBe('ollama:nomic-embed-text');
+  });
+
+  test('UNSET (unpinned) embedding_model falls through to the normal precedence', () => {
+    const r = pickRecommended(
+      EXPLAIN_EMBEDDING_ROWS,
+      { ...none, OPENROUTER_API_KEY: true },
+      /* ollamaReady */ true,
+      /* configured embedding_model */ null,
+    );
+    expect(r.id).toBe('ollama:nomic-embed-text');
+  });
+
+  test('configured provider absent from the option list (e.g. unknown/removed) falls through', () => {
+    const r = pickRecommended(
+      EXPLAIN_EMBEDDING_ROWS,
+      { ...none, OPENROUTER_API_KEY: true },
+      /* ollamaReady */ true,
+      /* configured embedding_model */ 'some-removed-provider:foo',
+    );
+    expect(r.id).toBe('ollama:nomic-embed-text');
+  });
+
+  test('configured + healthy Voyage beats OpenRouter (native pin still wins over precedence)', () => {
+    const r = pickRecommended(
+      EXPLAIN_EMBEDDING_ROWS,
+      { ...none, VOYAGE_API_KEY: true, OPENROUTER_API_KEY: true },
+      false,
+      'voyage:voyage-4',
+    );
+    expect(r.id).toBe('voyage:voyage-4');
+  });
+
+  test('configured OpenRouter model pinned to a non-canonical model preserves the exact pin, not the recipe default, and ignores detected Ollama', () => {
+    const r = pickRecommended(
+      EXPLAIN_EMBEDDING_ROWS,
+      { ...none, OPENROUTER_API_KEY: true },
+      /* ollamaReady */ true,
+      /* configured embedding_model */ 'openrouter:qwen/qwen3-embedding-8b',
+    );
+    expect(r.id).toBe('openrouter:qwen/qwen3-embedding-8b');
+    expect(r.id).not.toBe('openrouter:voyageai/voyage-4');
+    expect(r.reason.toLowerCase()).toContain('already configured');
+  });
+});
+
 describe('envReady', () => {
   test('true when all required env vars set', () => {
     const openai = getRecipe('openai');

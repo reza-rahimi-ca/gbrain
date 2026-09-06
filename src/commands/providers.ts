@@ -479,7 +479,8 @@ async function runExplain(args: string[]): Promise<void> {
     }
   }
 
-  const recommended = pickRecommended(options, env_detected, ollama.models_endpoint_valid === true);
+  const configuredEmbeddingModel = loadConfig()?.embedding_model ?? null;
+  const recommended = pickRecommended(options, env_detected, ollama.models_endpoint_valid === true, configuredEmbeddingModel);
 
   const matrix = {
     schema_version: SCHEMA_VERSION,
@@ -574,10 +575,37 @@ function consFor(r: Recipe): string[] {
  * new-install default: one key covers embedding + rerank-2.5 + multimodal),
  * OpenAI, local Ollama, Google, then OpenRouter LAST (the sole-key case: it
  * never beats a native key that is also present). Never recommends a
- * sunsetting provider. `@internal` exported for tests.
+ * sunsetting provider.
+ *
+ * `configuredEmbeddingModel` (the file/env-merged `embedding_model`, e.g.
+ * `"openrouter:voyageai/voyage-4"`) short-circuits the precedence chain: a
+ * provider the user already pinned wins as long as it's still healthy, so a
+ * merely-detected alternative (a local Ollama daemon, another provider's key)
+ * never displaces a working, explicitly configured pick. The returned `id`
+ * is the exact pinned string, not the provider's canonical/default model row
+ * — a pin to a non-default model under a healthy provider must not silently
+ * report a different model as "no change needed". Falls through to the
+ * precedence chain when the pin is unset, unpinned to a known provider, or
+ * unhealthy (its `env_ready` is false) — those are exactly the cases where an
+ * alternative recommendation is useful. `@internal` exported for tests.
  */
-export function pickRecommended(options: ProviderOption[], env: Record<string, boolean>, ollamaReady: boolean): { id: string; reason: string } {
+export function pickRecommended(
+  options: ProviderOption[],
+  env: Record<string, boolean>,
+  ollamaReady: boolean,
+  configuredEmbeddingModel?: string | null,
+): { id: string; reason: string } {
   const embOpts = options.filter(o => o.touchpoint === 'embedding' && !o.deprecated);
+  if (configuredEmbeddingModel) {
+    const providerId = configuredEmbeddingModel.split(':')[0];
+    const current = embOpts.find(o => o.id.startsWith(`${providerId}:`));
+    if (current?.env_ready) {
+      return {
+        id: configuredEmbeddingModel,
+        reason: `Already configured and healthy (embedding_model: ${configuredEmbeddingModel}) — no change needed.`,
+      };
+    }
+  }
   if (env.VOYAGE_API_KEY) {
     const voyage = embOpts.find(o => o.id.startsWith('voyage:'));
     if (voyage) return { id: voyage.id, reason: 'VOYAGE_API_KEY set — the default: voyage-4 at 1024 dims; the same key powers the rerank-2.5 reranker and the multimodal model.' };
