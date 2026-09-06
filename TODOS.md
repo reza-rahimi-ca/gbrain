@@ -11,10 +11,16 @@
   `test/process-watchdog.serial.test.ts` (SIGTERM attribution missing from
   captured stderr), and two assertions in `test/scripts/merge-lcov.test.ts`
   (SF normalization when the checkout directory itself is named `src`).
-  The extraction and capture failures seen during one parallel run did not
-  reproduce individually and were caused by sharing one exported
-  `GBRAIN_HOME` across test shards. Keep this item separate from the eight
-  scoped defect fixes unless one of those fixes depends on the same path.
+  A second detached-worktree control at the same baseline also reproduced
+  eight shared-process failures in shard 2, though the affected files pass
+  when run alone: `test/extract-atoms-failure-classes.test.ts` (completion
+  receipt full success records zero atoms) and seven successful-write cases
+  in `test/capture-op.test.ts` (the validation and dry-run cases still pass).
+  This corrects the initial attribution to cross-shard `GBRAIN_HOME` sharing:
+  the exact shard reproduces them with its own scratch home, so the remaining
+  issue is an existing within-process isolation/order dependency. Keep this
+  item separate from the eight scoped defect fixes unless one of those fixes
+  depends on the same path.
 
 ## Community fix wave follow-ups (filed 2026-09-01, v0.48.1.0 wave)
 
