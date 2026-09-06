@@ -38,25 +38,112 @@
 
 ## Verified baseline test failures (filed 2026-09-05)
 
-- [ ] **P2 — Restore a green full unit suite from baseline `941dc75cd`.**
-  A detached worktree at the clean starting commit reproduced these failures,
-  so they predate the OpenRouter follow-up defect work:
-  `test/sync-rename-reconcile.serial.test.ts` (frontmatter slug-authority
-  rejection retry), `test/pglite-disconnect-watchdog.serial.test.ts`
-  (watchdog attribution missing from captured stderr),
-  `test/process-watchdog.serial.test.ts` (SIGTERM attribution missing from
-  captured stderr), and two assertions in `test/scripts/merge-lcov.test.ts`
-  (SF normalization when the checkout directory itself is named `src`).
-  A second detached-worktree control at the same baseline also reproduced
-  eight shared-process failures in shard 2, though the affected files pass
-  when run alone: `test/extract-atoms-failure-classes.test.ts` (completion
-  receipt full success records zero atoms) and seven successful-write cases
-  in `test/capture-op.test.ts` (the validation and dry-run cases still pass).
-  This corrects the initial attribution to cross-shard `GBRAIN_HOME` sharing:
-  the exact shard reproduces them with its own scratch home, so the remaining
-  issue is an existing within-process isolation/order dependency. Keep this
-  item separate from the eight scoped defect fixes unless one of those fixes
-  depends on the same path.
+- [x] **P2 — Restore a green full unit suite from baseline `941dc75cd`: the
+  five scoped baseline fixes.** DONE (2026-09-06) —
+  1. `test/sync-rename-reconcile.serial.test.ts` (frontmatter slug-authority
+     rejection retry): the fixture's single-line body plus one injected
+     `slug:` frontmatter line scored ~45% similarity under git's default
+     50% rename threshold (R045), so `git diff --name-status -M` reported a
+     plain delete+add and the run never reached the rename-checkpoint code
+     path under test. Padded the body with repeated lines so the edit
+     reliably scores well above threshold (~75%, verified), and added an
+     explicit precondition assertion (`git diff --name-status -M` on the
+     committed delta) proving the rename is actually detected before
+     `performSync` runs. The slug-authority-rejection retry/checkpoint
+     assertions are unchanged.
+  2. `test/pglite-disconnect-watchdog.serial.test.ts` and
+  3. `test/process-watchdog.serial.test.ts` (both: stale stderr-attribution
+     assumption): the worker's `process.stderr` is proxied through the
+     main thread's message port, and the tests' whole premise is a main
+     loop starved permanently until the out-of-band watchdog kills it — so
+     the worker's in-flight log lines can never flush before the kill.
+     Removed the impossible stderr-content assertions and replaced them
+     with Bun's race-free `signalCode` plus marker-relative elapsed time
+     (an `ARMED` marker printed via `fs.writeSync` right before starving,
+     matching the existing pglite-harness technique). Added a companion
+     harness mode to each fixture (`wedge-no-handler` /
+     `stall-no-handler`) that arms the SAME watchdog but registers NO
+     SIGTERM listener — the kernel's default SIGTERM disposition doesn't
+     need the starved loop to run at all, so that process dies at the
+     watchdog's FIRST stage (`signalCode === 'SIGTERM'`, near the
+     deadline/stall threshold, well before grace) — the mirror-image proof
+     to the existing inert-handler mode's SIGKILL-at-deadline+grace
+     coverage. The hard-cap and healthy/disposed controls are unchanged.
+     Independent review caught that the PGLite `wedge-no-handler` upper
+     timing bound (`deadline+grace-100` = 5,500ms) was measured from the
+     harness's `ARMED` marker, which prints BEFORE `engine.disconnect()`
+     calls `installProcessWatchdog` at all — so the bound had zero margin
+     for the worker_threads Worker's own cold-start time (measured
+     elsewhere adding ~2s), even though `signalCode === 'SIGTERM'` already
+     proves first-stage ordering independent of timing. Fixed by reusing
+     the sibling `wedge-watchdog` test's already-measured 11s upper
+     allowance (a worker-boot tolerance, not a widened product timeout —
+     `WATCHDOG_DEADLINE_MS`/`GRACE_MS` are untouched) and documenting in
+     the test why `signalCode` is the exact proof while the wall-time
+     bound is a separate, looser allowance. Re-reviewed
+     `process-watchdog.serial.test.ts`'s new `stall-no-handler` bounds for
+     the same class of issue: its harness prints `ARMED` AFTER
+     `installStall()` already returned (i.e. after the Worker is already
+     under construction), so the marker-to-kill window there does not
+     absorb the "worker gets created at all" latency the PGLite case does
+     — confirmed empirically (5 direct-harness probes plus 3 fresh-home
+     `bun test` runs, `sinceArmedMs` consistently ~317-319ms against a
+     150-500ms bound, comfortable margin), so those tighter bounds were
+     kept as-is with a comment recording the measured margin instead of
+     being widened speculatively.
+  4. and 5. `test/scripts/merge-lcov.test.ts` (SF normalization when the
+     checkout directory itself is named `src`): `normalizeSf`'s
+     foreign-checkout branch used `lastIndexOf` on the `/<repo-basename>/`
+     marker. This repo's own checkout directory is literally named `src`,
+     which collides with the internal `src/` source directory — a foreign
+     path like `/ci/work/src/src/core/foo.ts` contains the marker TWICE,
+     and `lastIndexOf` matched the INNER occurrence, over-stripping the
+     real `src/` prefix (`core/foo.ts` instead of `src/core/foo.ts`) and
+     silently dropping those files from the `src/`-prefix-filtered JSON
+     metrics. The first fix pass swapped to `indexOf` (first occurrence),
+     which fixed the doubled-`src/src/` case but was flagged by
+     independent review as merely shifting the same "assume a fixed
+     position" guess — a runner prefix can just as easily repeat the
+     checkout's basename for reasons unrelated to the real checkout root,
+     making "first" no better justified than "last". Replaced with
+     candidate-boundary validation: every occurrence of the
+     `/<repo-basename>/` marker is a candidate boundary, and each
+     candidate's remaining repo-relative suffix is checked against the
+     REAL checkout on disk (exact full-path match first, then a
+     first-path-component-exists fallback); the boundary is accepted only
+     when exactly one candidate is plausible, and the absolute path is
+     kept unchanged (conservative) when zero or more-than-one candidates
+     tie. Added adversarial fixtures where the checkout basename repeats
+     in BOTH the runner prefix and the repo-relative path (for a checkout
+     literally named `src` — this repo's own layout — and for a
+     differently-named checkout backed by a real temp-dir fixture tree),
+     which the naive first/last pick could not distinguish and which now
+     correctly fall back to the conservative case; retained the
+     doubled-marker positive fixtures (now validated against real on-disk
+     paths instead of a fictional root, since the algorithm needs
+     something to check against) and the pre-existing no-recognizable-prefix
+     conservative case.
+  Verified: each affected test file run 3x independently under fresh
+  scratch `HOME`/`GBRAIN_HOME` (all `DATABASE_URL`/provider env vars
+  unset), plus all five files run together; `bun run typecheck` and
+  `bun run verify` both clean; diff scoped to the 6 test/fixture files
+  above plus `scripts/merge-lcov.ts`. The post-fix full unit run recorded
+  26,451 pass / 8 fail / 11 skip, with all 2,600 serial tests green and
+  exactly the eight separate shard-2 failures below remaining. Their two
+  affected files still pass alone (11/11 capture, 17/17 extract-atoms),
+  reconfirming the existing within-process isolation/order dependency.
+  A separate detached-worktree control at the same baseline also
+  reproduced eight shared-process failures in shard 2 of the full unit
+  suite, though the affected files pass when run alone:
+  `test/extract-atoms-failure-classes.test.ts` (completion receipt full
+  success records zero atoms) and seven successful-write cases in
+  `test/capture-op.test.ts` (the validation and dry-run cases still pass).
+  This is an existing within-process isolation/order dependency, NOT
+  cross-shard `GBRAIN_HOME` sharing (the exact shard reproduces it with
+  its own scratch home) — deliberately OUT OF SCOPE for the five fixes
+  above; still open, tracked here for whoever picks it up next. Doctor's
+  nondeterministic-scoring defect (tracked separately as "defect 3" in the
+  fork's later-defect list) is also out of scope and was not touched.
 
 ## Community fix wave follow-ups (filed 2026-09-01, v0.48.1.0 wave)
 

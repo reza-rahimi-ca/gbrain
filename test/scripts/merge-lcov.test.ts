@@ -173,10 +173,120 @@ describe("merge: SF normalization", () => {
 
   it("normalizeSf unit: strips cwd, strips any prefix ending in the repo dir name, keeps relatives", () => {
     expect(normalizeSf(`${REPO_ROOT}/src/a.ts`, REPO_ROOT)).toBe("src/a.ts");
+    // Single marker occurrence, no real backing file at the candidate path —
+    // resolved via the shallow tier (candidate's first component, "src",
+    // exists as a real top-level dir under REPO_ROOT).
     expect(normalizeSf(`/ci/work/${basename(REPO_ROOT)}/src/a.ts`, REPO_ROOT)).toBe("src/a.ts");
     expect(normalizeSf("src/a.ts", REPO_ROOT)).toBe("src/a.ts");
     expect(normalizeSf("./src/a.ts", REPO_ROOT)).toBe("src/a.ts");
-    expect(normalizeSf("/somewhere/else/src/a.ts", REPO_ROOT)).toBe("/somewhere/else/src/a.ts");
+    // Conservative case: no occurrence of `/<repo dir name>/` anywhere in the
+    // path at all — genuinely untied to the repo boundary, kept as-is (never
+    // matches src/, stays out of the JSON metrics).
+    expect(normalizeSf("/unrelated/machine/path/a.ts", REPO_ROOT)).toBe("/unrelated/machine/path/a.ts");
+  });
+
+  // The boundary picker is NOT "first occurrence" or "last occurrence" of the
+  // marker — it enumerates every candidate boundary and validates each
+  // against the real checkout on disk (exact full-path match first, then a
+  // "first path component exists" fallback), picking the boundary only when
+  // exactly one candidate is plausible. These fixtures use REAL filesystem
+  // state (REPO_ROOT itself, and a synthetic checkout built under `tmp`) —
+  // the validation has nothing to check against with a fictional root.
+  describe("normalizeSf: candidate-boundary validation against the real checkout", () => {
+    it("(a) checkout dir literally named 'src' (this repo's own layout): a doubled /src/src/ marker resolves to the single candidate that exists on disk, not to first-vs-last", () => {
+      // REPO_ROOT's basename IS "src", and it contains a real internal
+      // src/core/ directory (src/src/core/abort-check.ts on disk) — the
+      // exact collision this fix targets.
+      expect(normalizeSf(`${REPO_ROOT}/src/core/abort-check.ts`, REPO_ROOT)).toBe("src/core/abort-check.ts");
+      // Doubled marker: candidate "src/core/abort-check.ts" is an exact real
+      // path; candidate "core/abort-check.ts" (the over-strip a naive
+      // lastIndexOf/first-occurrence pick could produce) is not — unambiguous.
+      expect(normalizeSf("/ci/runner/work/src/src/core/abort-check.ts", REPO_ROOT))
+        .toBe("src/core/abort-check.ts");
+      // One more junk segment ahead of the doubled marker — still resolves
+      // to the same single real candidate.
+      expect(normalizeSf("/ci/runner/work/checkout/src/src/core/abort-check.ts", REPO_ROOT))
+        .toBe("src/core/abort-check.ts");
+      // Adversarial: the repo basename ("src") ALSO repeats earlier in the
+      // pure runner-prefix segment, unrelated to the checkout root
+      // ("/build/src/agent/work/..."). Three total marker occurrences, but
+      // only one candidate ("src/core/abort-check.ts") clears the exact
+      // tier — the spurious prefix occurrence's candidate
+      // ("agent/work/src/src/core/abort-check.ts") has no real top-level
+      // "agent" dir under REPO_ROOT, so it clears neither tier.
+      expect(normalizeSf("/build/src/agent/work/src/src/core/abort-check.ts", REPO_ROOT))
+        .toBe("src/core/abort-check.ts");
+    });
+
+    it("(a-ambiguous) checkout named 'src': repo basename repeats in BOTH the runner prefix and the repo-relative path, with no exact match to break the tie — fails conservatively", () => {
+      // Two candidate boundaries, neither an exact match, but BOTH first
+      // components ("test/" and "scripts/") are real top-level dirs under
+      // REPO_ROOT — genuinely ambiguous from string content + shallow
+      // validation alone. Retain the absolute path rather than guess.
+      const adversarial = "/ci/src/test/src/scripts/tool.ts";
+      expect(normalizeSf(adversarial, REPO_ROOT)).toBe(adversarial);
+    });
+
+    it("(b) a repo root with a different checkout directory name still resolves an internal source directory, including a doubled marker and an ambiguous case", () => {
+      const gbrainRoot = join(tmp, "gbrain-checkout");
+      mkdirSync(join(gbrainRoot, "src", "core"), { recursive: true });
+      writeFileSync(join(gbrainRoot, "src", "core", "foo.ts"), "// fixture\n");
+      mkdirSync(join(gbrainRoot, "scripts"), { recursive: true });
+      writeFileSync(join(gbrainRoot, "scripts", "tool.ts"), "// fixture\n");
+      mkdirSync(join(gbrainRoot, "test"), { recursive: true });
+
+      expect(normalizeSf(`${gbrainRoot}/src/core/foo.ts`, gbrainRoot)).toBe("src/core/foo.ts");
+      // Foreign machine, different absolute prefix, SAME checkout dir name,
+      // single marker occurrence.
+      expect(normalizeSf(`/runner/_work/example-org/gbrain-checkout/src/core/foo.ts`, gbrainRoot))
+        .toBe("src/core/foo.ts");
+      // A nested non-src internal directory normalizes the same way.
+      expect(normalizeSf(`/runner/_work/example-org/gbrain-checkout/scripts/tool.ts`, gbrainRoot))
+        .toBe("scripts/tool.ts");
+      // Doubled marker: an internal directory happens to share the
+      // checkout's own (non-"src") name. Only the inner candidate
+      // ("src/core/foo.ts") is an exact real path; the outer candidate
+      // ("gbrain-checkout/src/core/foo.ts") is not — unambiguous.
+      expect(normalizeSf(`/ci/runner/work/gbrain-checkout/gbrain-checkout/src/core/foo.ts`, gbrainRoot))
+        .toBe("src/core/foo.ts");
+      // Adversarial ambiguous case, mirrored for a non-"src" checkout name:
+      // basename repeats in the runner prefix AND inside the repo-relative
+      // path; both candidates' first components ("test/", "scripts/") are
+      // real dirs, neither candidate is an exact match (the leaf file
+      // doesn't exist) — conservative fallback.
+      const adversarial = `/ci/gbrain-checkout/test/gbrain-checkout/scripts/nonexistent-tool.ts`;
+      expect(normalizeSf(adversarial, gbrainRoot)).toBe(adversarial);
+    });
+
+    it("(c) traversal-shaped candidates are rejected fail-closed BEFORE any filesystem probe, never escaping root", () => {
+      const travRoot = join(tmp, "trav-checkout");
+      mkdirSync(join(travRoot, "src", "core"), { recursive: true });
+      writeFileSync(join(travRoot, "src", "core", "foo.ts"), "// fixture\n");
+      // A sibling directory OUTSIDE travRoot whose file would exist if a
+      // traversal candidate were ever handed to existsSync unfiltered — this
+      // proves the escape target is real, not merely hypothetical.
+      mkdirSync(join(tmp, "trav-outside"), { recursive: true });
+      writeFileSync(join(tmp, "trav-outside", "secret.ts"), "// should never be probed\n");
+
+      // Single marker occurrence; the only candidate is traversal-shaped
+      // ("../trav-outside/secret.ts") and must be rejected lexically before
+      // existsSync ever runs — the real escape target existing on disk must
+      // not matter. Conservative fallback: original absolute SF preserved.
+      const escapeSf = "/ci/work/trav-checkout/../trav-outside/secret.ts";
+      expect(normalizeSf(escapeSf, travRoot)).toBe(escapeSf);
+
+      // Doubled marker, both candidates traversal-shaped (".." segments) —
+      // still 0 plausible candidates, still preserved unchanged.
+      const doubledEscapeSf = "/ci/trav-checkout/trav-checkout/../../etc/passwd";
+      expect(normalizeSf(doubledEscapeSf, travRoot)).toBe(doubledEscapeSf);
+
+      // Doubled marker where ONE candidate is traversal-shaped (rejected
+      // lexically) and the OTHER is a safe, exact, real repo-relative path —
+      // the safe boundary still resolves normally; a ".." elsewhere in the
+      // string doesn't poison an unrelated valid candidate.
+      const mixedSf = "/ci/work/decoy/trav-checkout/../trav-checkout/src/core/foo.ts";
+      expect(normalizeSf(mixedSf, travRoot)).toBe("src/core/foo.ts");
+    });
   });
 });
 

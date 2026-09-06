@@ -11,6 +11,13 @@
  *                    that the in-loop close bound can never fire while the
  *                    loop is starved (no warn, no post-disconnect marker;
  *                    only the parent's cap ends it).
+ *   wedge-no-handler — same wedge + watchdog env as wedge-watchdog, but with
+ *                    NO SIGTERM handler registered. The kernel's default
+ *                    SIGTERM disposition doesn't need the event loop to run,
+ *                    so this process must die at the watchdog's FIRST stage
+ *                    (SIGTERM near the deadline), never reaching the
+ *                    SIGKILL/grace stage — the mirror-image proof to
+ *                    wedge-watchdog's SIGKILL-backstop coverage.
  *   clean-watchdog — real close with a deliberately-tiny watchdog env: proves
  *                    the lethal-knob floor clamps up and a disposed watchdog
  *                    never kills a healthy disconnect.
@@ -35,12 +42,16 @@ const mode = process.argv[2] ?? 'wedge-control';
 // SIGKILL at deadline+grace is the real backstop. Without a handler the
 // KERNEL default would kill at the SIGTERM deadline and the SIGKILL path
 // would ship untested (#4284 eng outside-voice, empirically probed).
-process.on('SIGTERM', () => { /* no-op — a starved loop never runs this */ });
+// wedge-no-handler deliberately skips this so the FIRST stage (SIGTERM) is
+// what ends the process — that path was otherwise never exercised.
+if (mode !== 'wedge-no-handler') {
+  process.on('SIGTERM', () => { /* no-op — a starved loop never runs this */ });
+}
 
 const engine = new PGLiteEngine();
 await engine.connect({ engine: 'pglite' }); // in-memory; no initSchema — close is monkeypatched
 
-if (mode === 'wedge-watchdog' || mode === 'wedge-control') {
+if (mode === 'wedge-watchdog' || mode === 'wedge-control' || mode === 'wedge-no-handler') {
   const eng = engine as unknown as { _db: { close: () => Promise<void> } | null };
   eng._db!.close = () => {
     const t0 = Date.now();

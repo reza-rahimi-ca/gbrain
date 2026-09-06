@@ -63,7 +63,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -173,10 +173,103 @@ export function parseLcovText(text: string): ParseResult {
 // ---------------------------------------------------------------------------
 
 /**
+ * Enumerate every boundary in `p` where `marker` (`/<repoDirName>/`) occurs,
+ * and pick the one whose remaining repo-relative candidate is plausibly
+ * rooted in THIS checkout (`root`) — never assume the checkout boundary is
+ * the first, or the last, occurrence.
+ *
+ * Why a naive first/last pick is wrong: a checkout whose own directory is
+ * named `src` (this repo's is) collides with the internal `src/` source
+ * directory — a path like `/ci/work/src/src/core/foo.ts` contains the
+ * marker `/src/` TWICE (overlapping at the shared `/`). Picking the last
+ * occurrence over-strips (drops the real `src/` prefix, yielding
+ * `core/foo.ts`); picking the first happens to work for THIS shape, but a
+ * runner prefix can just as easily repeat the checkout's basename earlier
+ * in the path for reasons unrelated to the checkout root (e.g. a runner
+ * work directory literally named after the repo), so "first" is not
+ * structurally justified either — it's the same guess with the coin
+ * flipped.
+ *
+ * Instead, every candidate boundary is scored against the actual checkout
+ * on disk:
+ *   1. exact  — `root/<candidate>` exists as a real path. Strongest signal.
+ *   2. shallow — `root/<candidate's first path component>` exists. Weaker,
+ *      but still means the candidate's top-level dir is real in this
+ *      checkout (covers files that don't exist locally, e.g. a file only
+ *      present in the CI checkout, but whose top-level dir — `src`,
+ *      `scripts`, `test` — does).
+ * The best tier wins. If more than one DISTINCT candidate clears the same
+ * best tier, the boundary is genuinely ambiguous from string content alone
+ * — fail conservatively and return `p` unchanged (an absolute path stays
+ * out of the `src/`-prefixed JSON metrics rather than risk over/under
+ * stripping). Same if no candidate clears any tier.
+ */
+/**
+ * Fail-closed lexical gate: a candidate is only plausible as a repo-relative
+ * POSIX path if it's non-empty, not absolute or drive-qualified, and none of
+ * its "/"-separated segments are "." or "..". Must run BEFORE any
+ * existsSync probe — a crafted SF containing the repo basename followed by
+ * "../" (e.g. `/x/thisrepo/../../etc/passwd`) would otherwise reach the
+ * filesystem check with a traversal-shaped candidate still attached.
+ */
+function isPlausibleRepoRelativeCandidate(candidate: string): boolean {
+  if (candidate === "") return false;
+  if (candidate.startsWith("/") || /^[A-Za-z]:\//.test(candidate)) return false;
+  return candidate.split("/").every((seg) => seg !== "." && seg !== "..");
+}
+
+/**
+ * Defense in depth beyond the lexical gate: confirm `root/candidate` really
+ * resolves to a path contained under `root`. Catches anything the segment
+ * check might miss (e.g. an unexpected separator/encoding), rather than
+ * relying on string shape alone.
+ */
+function isContainedUnderRoot(root: string, candidate: string): boolean {
+  const resolvedRoot = resolve(root);
+  const resolvedCandidate = resolve(root, candidate);
+  const rel = relative(resolvedRoot, resolvedCandidate);
+  return rel !== ".." && !rel.startsWith(".." + "/") && !isAbsolute(rel);
+}
+
+function resolveForeignCheckoutPrefix(p: string, marker: string, root: string): string {
+  const boundaries: number[] = [];
+  let from = 0;
+  for (;;) {
+    const idx = p.indexOf(marker, from);
+    if (idx < 0) break;
+    boundaries.push(idx + marker.length);
+    from = idx + 1; // step by 1, not marker.length: catches overlapping markers (/src/src/)
+  }
+  if (boundaries.length === 0) return p; // no marker at all — untied to this checkout, keep as-is
+
+  const rawCandidates = [...new Set(boundaries.map((b) => p.slice(b)))];
+  // Reject anything traversal-shaped or otherwise not repo-relative BEFORE it
+  // ever reaches existsSync — see isPlausibleRepoRelativeCandidate.
+  const candidates = rawCandidates.filter(
+    (c) => isPlausibleRepoRelativeCandidate(c) && isContainedUnderRoot(root, c),
+  );
+  if (candidates.length === 0) return p; // no safe candidate — conservative, keep the absolute path
+
+  const exact = candidates.filter((c) => existsSync(join(root, c)));
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return p; // ambiguous even at the strongest tier
+
+  const shallow = candidates.filter((c) => {
+    const first = c.split("/")[0];
+    return first.length > 0 && existsSync(join(root, first));
+  });
+  if (shallow.length === 1) return shallow[0];
+
+  return p; // 0 or >1 plausible candidates — conservative, keep the absolute path
+}
+
+/**
  * Normalize an SF path to repo-relative POSIX. Repo root = repoRootAbs
  * (process.cwd() in production). Also strips any absolute prefix ending in
  * the repo directory name (CI checkouts live under a different absolute
- * root than the machine that reads the artifact).
+ * root than the machine that reads the artifact) — see
+ * `resolveForeignCheckoutPrefix` for how the boundary is chosen among
+ * multiple candidates.
  */
 export function normalizeSf(sfRaw: string, repoRootAbs: string): string {
   let p = sfRaw.replace(/\\/g, "/");
@@ -186,10 +279,7 @@ export function normalizeSf(sfRaw: string, repoRootAbs: string): string {
   else if (p.startsWith("/") || /^[A-Za-z]:\//.test(p)) {
     const repoDirName = root.slice(root.lastIndexOf("/") + 1);
     const marker = "/" + repoDirName + "/";
-    const idx = p.lastIndexOf(marker);
-    if (idx >= 0) p = p.slice(idx + marker.length);
-    // else: absolute path outside any recognizable repo prefix — keep as-is;
-    // it will not match src/ and stays out of the JSON metrics.
+    p = resolveForeignCheckoutPrefix(p, marker, root);
   }
   while (p.startsWith("./")) p = p.slice(2);
   return p;

@@ -13,28 +13,68 @@ import { join } from 'node:path';
 
 const HARNESS = join(import.meta.dir, 'fixtures', 'watchdog-harness.ts');
 
+interface HarnessRun {
+  exitCode: number | null;
+  /** Bun's race-free signal attribution — set even when exitCode is also non-null. */
+  signalCode: string | null;
+  signalled: boolean;
+  elapsedMs: number;
+  /** wall-clock ms from the child's ARMED marker to exit; -1 if never armed (stall-* modes only). */
+  sinceArmedMs: number;
+  stdout: string;
+  stderr: string;
+  killedByTest: boolean;
+}
+
+/**
+ * Spawn the harness. `hardCapMs` is a spawn-relative failsafe (kept for the
+ * hard-deadline modes, which print no marker); stall-* modes additionally
+ * print an ARMED marker right before starving, and `sinceArmedMs` measures
+ * from that — Bun/worker boot time is otherwise unpredictable noise on a
+ * loaded box (same technique as pglite-disconnect-watchdog.serial.test.ts).
+ */
 async function runHarness(
   mode: string,
   deadlineMs: number,
   graceMs: number,
   hardCapMs: number,
-): Promise<{ exitCode: number | null; signalled: boolean; elapsedMs: number; stdout: string; stderr: string; killedByTest: boolean }> {
+): Promise<HarnessRun> {
   const proc = Bun.spawn(['bun', HARNESS, mode, String(deadlineMs), String(graceMs)], {
     stdout: 'pipe',
     stderr: 'pipe',
   });
   const start = Date.now();
   let killedByTest = false;
+  let armedAt = 0;
   const cap = setTimeout(() => { killedByTest = true; proc.kill('SIGKILL'); }, hardCapMs);
+  let stdout = '';
+  const stdoutReader = (async () => {
+    const dec = new TextDecoder();
+    for await (const chunk of proc.stdout) {
+      stdout += dec.decode(chunk);
+      if (!armedAt && stdout.includes('ARMED')) armedAt = Date.now();
+    }
+  })();
   await proc.exited;
+  const exitAt = Date.now();
   clearTimeout(cap);
-  const elapsedMs = Date.now() - start;
-  const stdout = await new Response(proc.stdout).text();
+  await stdoutReader;
+  const elapsedMs = exitAt - start;
   const stderr = await new Response(proc.stderr).text();
+  const signalCode = (proc as unknown as { signalCode: string | null }).signalCode;
   // Bun surfaces signal death via exitCode === null + signalCode, or a negative
   // exitCode on some platforms. Treat "not a clean 0" as signalled for our purpose.
   const signalled = proc.exitCode !== 0;
-  return { exitCode: proc.exitCode, signalled, elapsedMs, stdout, stderr, killedByTest };
+  return {
+    exitCode: proc.exitCode,
+    signalCode,
+    signalled,
+    elapsedMs,
+    sinceArmedMs: armedAt ? exitAt - armedAt : -1,
+    stdout,
+    stderr,
+    killedByTest,
+  };
 }
 
 describe('process-watchdog integration (Bun-pinned)', () => {
@@ -68,19 +108,54 @@ describe('process-watchdog integration (Bun-pinned)', () => {
 });
 
 describe('loop-stall watchdog integration (Bun-pinned, #4281)', () => {
+  const STALL_MS = 300;
+  const GRACE_MS = 250;
+
   test('starved loop with a SIGTERM listener is SIGTERMed then SIGKILLed around stall+grace', async () => {
     // stall 300 + grace 250 = ~550ms expected death (plus worker boot). The
     // harness registers a SIGTERM listener, so only the SIGKILL escalation can
     // actually kill it — exactly the serve-http shape (process-cleanup's
     // handler can't run on a starved loop).
-    const r = await runHarness('stall-with', 300, 250, 5000);
+    //
+    // NOTE: we do not assert on the worker's in-flight "SIGTERM"/"SIGKILL"
+    // stderr lines. The worker's process.stderr is proxied through the main
+    // thread's message port; while the main loop is genuinely starved (the
+    // premise of this test), that proxied write can never flush before the
+    // SIGKILL that ends the process. signalCode + marker-relative timing
+    // below are the race-free proof of the escalation instead.
+    const r = await runHarness('stall-with', STALL_MS, GRACE_MS, 5000);
     expect(r.stdout).not.toContain('SURVIVED'); // the bug symptom
     expect(r.killedByTest).toBe(false);          // watchdog, not the test, killed it
-    expect(r.signalled).toBe(true);
-    expect(r.elapsedMs).toBeLessThan(3500);
-    // The worker latched SIGTERM first, then escalated — both visible in its log.
-    expect(r.stderr).toContain('SIGTERM');
-    expect(r.stderr).toContain('SIGKILL');
+    expect(r.signalCode).toBe('SIGKILL');
+    // Death lands near stall+grace, measured from the child's ARMED marker.
+    expect(r.sinceArmedMs).toBeGreaterThanOrEqual(STALL_MS + GRACE_MS - 150);
+    expect(r.sinceArmedMs).toBeLessThan(3500);
+  }, 15000);
+
+  test('stall-no-handler: without a SIGTERM listener, the FIRST stage kills near the stall threshold, before grace/SIGKILL', async () => {
+    // Same armed wedge as stall-with, but with no SIGTERM listener registered.
+    // The kernel's default SIGTERM disposition doesn't need the (starved)
+    // event loop to run at all, so this process must die at the watchdog's
+    // FIRST stage — the mirror-image proof to stall-with's SIGKILL backstop.
+    const r = await runHarness('stall-no-handler', STALL_MS, GRACE_MS, 5000);
+    expect(r.stdout).not.toContain('SURVIVED'); // the bug symptom
+    expect(r.killedByTest).toBe(false);          // watchdog, not the test, killed it
+    // signalCode === 'SIGTERM' is the race-free proof of ordering (first
+    // stage, not the SIGKILL/grace stage) — timing alone could never
+    // distinguish the two as cleanly.
+    expect(r.signalCode).toBe('SIGTERM');
+    // Unlike pglite-disconnect-watchdog.serial.test.ts's ARMED marker (which
+    // is printed BEFORE installProcessWatchdog is even called, so it precedes
+    // the worker_threads Worker's own boot time), this harness's ARMED prints
+    // AFTER installStall() returns — i.e. AFTER `new Worker(...)` has already
+    // been issued. The window this bound has to tolerate is only "worker
+    // reaches its first internal tick", not "worker gets created at all", so
+    // it's structurally smaller. Measured directly (bun test, fresh scratch
+    // HOME, x5): sinceArmedMs lands at ~317-319ms, comfortably inside this
+    // bound — kept tight rather than widened to an arbitrary allowance
+    // because the margin is real, not assumed.
+    expect(r.sinceArmedMs).toBeGreaterThanOrEqual(STALL_MS - 150);
+    expect(r.sinceArmedMs).toBeLessThan(STALL_MS + GRACE_MS - 50);
   }, 15000);
 
   test('healthy petting loop is NEVER killed across multiple stall windows', async () => {
