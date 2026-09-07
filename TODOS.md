@@ -36,6 +36,31 @@
   `test/upgrade-clawhub-bunlink-unknown-source-pin.serial.test.ts`,
   `test/self-upgrade-pending.test.ts`, `test/autopilot-self-upgrade.test.ts`.
 
+- [ ] **Defect 3, P2: Explain consecutive-doctor brain-score/orphan drift.**
+  OPEN, cause not reproduced after three investigation attempts. The fixed
+  scratch fixture is reproducible at `brain_score=58/100` and an orphan ratio
+  of 25% (`30/121` linkable pages), but repeated reads do not drift: five
+  consecutive full doctor runs were stable, and three independent reopen
+  cycles against the same on-disk PGLite brain returned the same values.
+  `getHealth()` and `getOrphansData()` are likewise stable on fixed fixtures.
+  The `most_connected` query's missing tie-breaker is a real detail-ordering
+  nondeterminism, but it is not an input to either `brain_score` or
+  `orphan_ratio` and is ruled out as the reported cause. The original
+  differing JSON pair was not found in active/archived OpenClaw sessions,
+  Claude session logs, repository `.context` artifacts, or saved `/tmp`
+  doctor/repro outputs. Existing saved production doctor reports bracket
+  explicit sync/policy/contact/cleanup mutations and therefore do not prove
+  unchanged-brain drift.
+
+  Decision (2026-09-07): leave documented but unresolved. These metrics are
+  currently cosmetic, not a correctness or security boundary, so the value
+  of a live production probe does not justify its risk. Do not run the probe,
+  stop writers, or access production data for this defect. Revisit only if
+  `brain_score` or `orphan_ratio` starts driving an automated gate, alert, or
+  another behavior that depends on metric accuracy; at that point, recover
+  the original differing JSON pair if possible and obtain Reza's explicit
+  approval for an exact read-only production scope before proceeding.
+
 ## Verified baseline test failures (filed 2026-09-05)
 
 - [x] **P2 — Restore a green full unit suite from baseline `941dc75cd`: the
@@ -129,21 +154,47 @@
   `bun run verify` both clean; diff scoped to the 6 test/fixture files
   above plus `scripts/merge-lcov.ts`. The post-fix full unit run recorded
   26,451 pass / 8 fail / 11 skip, with all 2,600 serial tests green and
-  exactly the eight separate shard-2 failures below remaining. Their two
-  affected files still pass alone (11/11 capture, 17/17 extract-atoms),
-  reconfirming the existing within-process isolation/order dependency.
-  A separate detached-worktree control at the same baseline also
-  reproduced eight shared-process failures in shard 2 of the full unit
-  suite, though the affected files pass when run alone:
-  `test/extract-atoms-failure-classes.test.ts` (completion receipt full
-  success records zero atoms) and seven successful-write cases in
-  `test/capture-op.test.ts` (the validation and dry-run cases still pass).
-  This is an existing within-process isolation/order dependency, NOT
-  cross-shard `GBRAIN_HOME` sharing (the exact shard reproduces it with
-  its own scratch home) — deliberately OUT OF SCOPE for the five fixes
-  above; still open, tracked here for whoever picks it up next. Doctor's
+  exactly the eight separate shard-2 failures tracked below remaining.
+  Doctor's
   nondeterministic-scoring defect (tracked separately as "defect 3" in the
   fork's later-defect list) is also out of scope and was not touched.
+
+- [ ] **P2 — Repair the eight pre-existing shard-2 shared-process
+  isolation/order failures.** **BASELINE / pre-existing; untracked until
+  2026-09-07.** The affected assertions are:
+  1. `test/extract-atoms-failure-classes.test.ts` — `runPhaseExtractAtoms —
+     completion receipt (gbrain#4148) > full success flips atoms to the real
+     source_hash and stamps the page` (`atoms_extracted` is 0, expected 1).
+  2. `test/capture-op.test.ts` — `captures a note under a stable inbox/ slug
+     and stamps provenance server-side`.
+  3. `test/capture-op.test.ts` — `type routes the default slug prefix (diary
+     → life/diary/)`.
+  4. `test/capture-op.test.ts` — `frontmatter type is the stored type when no
+     type param is given`.
+  5. `test/capture-op.test.ts` — `the default-slug prefix follows the
+     frontmatter type (diary → life/diary/)`.
+  6. `test/capture-op.test.ts` — `no frontmatter and no type param still
+     stamps note; an explicit type param beats frontmatter`.
+  7. `test/capture-op.test.ts` — `[EV7] fenced client: default slug nests
+     under the first bound prefix`.
+  8. `test/capture-op.test.ts` — `[EV7] fenced client + typed capture: the
+     ENTIRE default slug (type prefix included) nests under the bound prefix`.
+  Reproducer: the default four-way unit runner's deterministic shard-2
+  composition, `SHARD=2/4 bash scripts/run-unit-shard.sh
+  --max-concurrency=4`. This selects every fourth file starting at the
+  second entry in the lexically sorted non-E2E/non-slow/non-serial unit-test
+  list: 413 files replayed in one shared Bun process.
+  The two affected files pass alone (11/11 capture, 17/17 extract-atoms),
+  while the exact manifest fails with the same eight assertions on both the
+  post-fix tree (8 fail / 13,334 tests) and a detached worktree pinned
+  literally to `941dc75cd` (8 fail / 6,001 tests; the older revision has a
+  smaller test inventory). A separate
+  `SHARD=2/8` run at `941dc75cd` is green (2,822 pass / 0 fail / 6 skip), so
+  the denominator and manifest are material: "shard 2" alone is not a
+  sufficient reproducer. Both exact-manifest runs used independent scratch
+  `HOME`/`TMPDIR`; therefore this is an existing within-process
+  isolation/order dependency, not cross-shard `GBRAIN_HOME` sharing and not
+  a regression from this session's changes.
 
 ## Community fix wave follow-ups (filed 2026-09-01, v0.48.1.0 wave)
 
