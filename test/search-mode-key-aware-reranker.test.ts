@@ -129,7 +129,7 @@ describe('attributeKnob — dashboard attribution for the substitution', () => {
     const input = { mode: 'balanced', overrides: { reranker_model: 'voyage:rerank-2.5-lite' }, defaultRerankerModel: OR };
     const a = attributeKnob('reranker_model', input, resolveSearchMode(input));
     expect(a.source).toBe('override');
-    expect(a.source_detail).toBe('config: search.reranker_model');
+    expect(a.source_detail).toBe('config: search.reranker.model');
   });
 
   test('other knobs are untouched by the rung', () => {

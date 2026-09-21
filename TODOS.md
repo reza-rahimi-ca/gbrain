@@ -1,5 +1,34 @@
 # TODOS
 
+## Post-rebase test follow-ups (filed 2026-09-21, rebase onto upstream d13aa742f/v0.51.0.0)
+
+- [ ] **P2 — Update `test/scripts/run-unit-parallel.test.ts` for the grouped-shard runner rewrite.**
+  **What:** upstream's `039f2cd52 v0.50.4.0 ci: accelerate required checks with isolated
+  test workers (#5131)` rewrote `scripts/run-unit-parallel.sh` around grouped shards, a new
+  `__gbrain_unit_shard__`/`__gbrain_unit_group__` summary-aggregation protocol, and
+  interrupt/cleanup trap handling. It merged with no conflicts, but three of this repo's own
+  meta-tests for the runner still assert the OLD single-invocation-per-shard shape and now
+  fail: "OOM rescue lane > rescues an OOM-signature failure serially and exits 0 with an
+  oom_rescued note", "failure-log contract (d) > clears .context/test-failures.log to empty
+  when all shards pass", and "exit-code propagation (a) > exits zero when all shards pass".
+  **Why:** these are CI-harness self-tests, not product tests — the actual `bun run test`
+  invocation (sharded + serial) is green (6637 pass / 0 real fail unit, 2871 pass / 0 fail
+  serial) on 2026-09-21 against the rebased `feat/openrouter-only-install`. **Fix:** update
+  the fixtures/assertions to match the new grouped-shard summary markers and trap-based
+  cleanup before trusting this file's own tests again. **Effort:** M. **Priority:** P2.
+- [x] **Fixed during rebase: `test/search-mode-key-aware-reranker.test.ts` expected the
+  stale `config: search.reranker_model` (underscore) label.** Upstream's `KNOB_CONFIG_KEY`
+  table (merged during the same rebase) corrected `attributeKnob`'s override label to use
+  the real config key, `search.reranker.model` (dotted) — the naive pre-rebase template
+  (`` `config: search.${knob}` ``) never matched the actual `gbrain config set
+  search.reranker.model` path. Test updated to assert the corrected value.
+- [ ] **P3 — `test/check-resolvable-cli.test.ts` "empty cwd falls back to install-path" is
+  environment-sensitive on this machine, independent of the rebase.** Both before and after
+  the rebase, `resolveSkillsDir` resolves to `source: 'openclaw_workspace_home_root'`
+  instead of the expected `'install_path'` when run from this checkout/environment.
+  Pre-existing, not a regression — verified identical on
+  `backup/feat-openrouter-only-install-pre-rebase-20260921`. **Effort:** S. **Priority:** P3.
+
 ## Security fix wave follow-ups (filed 2026-09-15, follow-up from v0.50.5.0)
 
 - [ ] **P2 — cwd-`.env` quarantine: decide the remaining `GBRAIN_*` variables.**
