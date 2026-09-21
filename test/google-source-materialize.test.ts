@@ -39,7 +39,13 @@ import { importFile } from '../src/core/import-file.ts';
 let engine: PGLiteEngine;
 let schemaVersion: string;
 
+let savedFetchGap: string | undefined;
+
 beforeAll(async () => {
+  // The Gmail sweep paces threads.get ~1/s against the per-user quota; the
+  // fake API has no quota, so disable the gap or every thread costs 1.25s.
+  savedFetchGap = process.env.GBRAIN_GMAIL_FETCH_GAP_MS;
+  process.env.GBRAIN_GMAIL_FETCH_GAP_MS = '0';
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -47,6 +53,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (savedFetchGap === undefined) delete process.env.GBRAIN_GMAIL_FETCH_GAP_MS;
+  else process.env.GBRAIN_GMAIL_FETCH_GAP_MS = savedFetchGap;
   await engine.disconnect();
 });
 

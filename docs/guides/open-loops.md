@@ -67,7 +67,13 @@ Guardrails: injection-hardened input (the model sees the NEWEST 12k of the
 thread, so the latest reply is always visible to the judge), ALL-or-nothing
 parse barrier (a malformed model response writes nothing), only the last 30
 days of mail (the deep backfill is never extracted), kill switch
-`gbrain config set loops.extraction_enabled false`. With no chat provider
+`gbrain config set loops.extraction_enabled false`. The judge runs on the
+default chat model unless you pin one with
+`gbrain config set loops.extraction_model <provider:model>` — the verdict is a
+small JSON object, so a cheap model is the natural fit (e.g.
+`openrouter:deepseek/deepseek-v4.1-flash`; for DeepSeek via OpenRouter the
+judge sends `reasoning_effort: none` so reasoning tokens can't consume the
+output budget). With no chat provider
 configured (a keyless install, or an outage) the sweep enqueues no
 extraction jobs and logs one line saying so — the email pages still import,
 and the threads are extracted on their next touch or by

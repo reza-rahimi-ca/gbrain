@@ -1415,6 +1415,11 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // google-source email pages (default ON for google sources; deterministic
   // thread detection is unaffected). `gbrain config set loops.extraction_enabled false`.
   'loops.extraction_enabled',
+  // Model for the open-loop LLM judge (`provider:model`). Unset → the default
+  // chat model. A cheap model suits the small JSON verdict; for DeepSeek via
+  // OpenRouter, reasoning is switched off per call (reasoning_effort: none).
+  // `gbrain config set loops.extraction_model openrouter:deepseek/deepseek-v4.1-flash`
+  'loops.extraction_model',
   // #2113: output-token cap for the per-turn facts extractor (default 4000).
   'facts.extraction_max_tokens',
   // #3852: operator-set system-prompt appendix for the facts extractor (e.g.

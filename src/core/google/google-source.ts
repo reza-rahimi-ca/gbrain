@@ -465,6 +465,55 @@ async function sweepCalendar(
 
 const BACKFILL_BATCH_THREADS = 25;
 
+/**
+ * Minimum spacing between consecutive `threads.get` calls, in ms.
+ *
+ * Gmail bills `threads.get` at 40 quota units and (since the May 2026 quota
+ * update) gives a new Cloud project 6,000 units per minute per user. The
+ * limiter is a leaky bucket, not a per-minute reset: a burst of ~50 fetches in
+ * a few seconds is refused (`rateLimitExceeded`, "Total Query Cost / Units per
+ * minute per user", no Retry-After) even though the same 50 spread across the
+ * minute pass. Once a burst trips it, every retry ladder the client climbs
+ * drains the refill too, collapsing sustained throughput to ~10 threads/min —
+ * slow enough that a busy delta window outlives autopilot's sync-job timeout
+ * and the history cursor never advances. Spacing fetches ~1/s stays under the
+ * sustained rate, so the same window finishes in minutes with few or no 403s.
+ *
+ * `GBRAIN_GMAIL_FETCH_GAP_MS` overrides the gap (0 disables — tests use 0;
+ * grandfathered 15,000-unit projects can set it lower).
+ */
+const DEFAULT_GMAIL_FETCH_GAP_MS = 1_250;
+
+export function resolveGmailFetchGapMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.GBRAIN_GMAIL_FETCH_GAP_MS;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_GMAIL_FETCH_GAP_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_GMAIL_FETCH_GAP_MS;
+}
+
+/**
+ * Returns an awaitable that resolves once at least `gapMs` has elapsed since
+ * the previous call started (the first call never waits). Abort-aware: an
+ * aborted signal resolves immediately so a cancelled sync doesn't linger in a
+ * pacing sleep. `now` is injectable for tests.
+ */
+export function createFetchPacer(
+  gapMs: number,
+  now: () => number = Date.now,
+): (signal?: AbortSignal) => Promise<void> {
+  let lastStartMs = Number.NEGATIVE_INFINITY;
+  return async (signal) => {
+    const waitMs = lastStartMs + gapMs - now();
+    if (waitMs > 0 && !signal?.aborted) {
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, waitMs);
+        signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+      });
+    }
+    lastStartMs = now();
+  };
+}
+
 async function processThread(
   deps: GoogleSyncDeps,
   gmail: GmailClient,
@@ -649,6 +698,10 @@ async function sweepGmail(
 ): Promise<boolean> {
   const nowMs = Date.now();
   const cutoffMs = nowMs - deps.cfg.historyDays * 86_400_000;
+  // Per-user quota pacing for every threads.get below (both lanes) — see
+  // DEFAULT_GMAIL_FETCH_GAP_MS. The retry ladder in google-clients.ts stays as
+  // the backstop for whatever the pacer doesn't prevent.
+  const pace = createFetchPacer(resolveGmailFetchGapMs());
   // A --full run retries poisoned threads (fresh ledger); steady-state runs
   // keep skipping them so one bad thread can't wedge every sync.
   if (deps.opts.full) state.gmail_fail_counts = {};
@@ -703,6 +756,7 @@ async function sweepGmail(
           if (deps.opts.signal?.aborted) break;
           if (poisoned(tid)) continue;
           try {
+            await pace(deps.opts.signal);
             const thread = await processThread(deps, gmail, tid, activePack, summary, countedSlugs);
             processedAny = true;
             if (failCounts[tid]) delete failCounts[tid];
@@ -815,6 +869,7 @@ async function sweepGmail(
     if (deps.opts.signal?.aborted) return false;
     if (poisoned(tid)) continue;
     try {
+      await pace(deps.opts.signal);
       const thread = await processThread(deps, gmail, tid, activePack, summary, countedSlugs);
       if (failCounts[tid]) delete failCounts[tid];
       const newest = thread?.messages[thread.messages.length - 1]?.internalDateMs ?? 0;

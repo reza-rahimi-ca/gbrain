@@ -168,6 +168,19 @@ the 2-attempt budget used for other retryable failures (like a 401 needing a
 token refresh): giving up too early used to mean a thread that would have
 succeeded a few seconds later was instead skipped for the rest of the sync.
 
+The sweep also **paces** `threads.get` calls — at least 1.25 s between the
+start of one fetch and the next, in both the backfill and delta lanes. Gmail's
+per-user quota is a leaky bucket, not a per-minute reset: since the May 2026
+quota update a new Cloud project gets 6,000 units/min/user and `threads.get`
+costs 40 units, and a burst of ~50 fetches in a few seconds is refused even
+though the same 50 spread over the minute pass. Once a burst trips the limit,
+every retry ladder drains the refill too, and sustained throughput collapses
+to ~10 threads/min — slow enough that a busy delta window outlives autopilot's
+sync-job timeout and the history cursor never advances. Pacing keeps a sync
+under the sustained rate so the same window finishes in minutes with few or no
+403s. Tune with `GBRAIN_GMAIL_FETCH_GAP_MS` (ms between fetch starts; `0`
+disables — projects grandfathered on the older 15,000-unit limit can go lower).
+
 Even when a thread's retry budget IS exhausted, a rate-limit failure is never
 counted toward the poison-skip threshold — unlike a genuine per-thread
 failure (a malformed message, a permissions edge case), a rate limit says

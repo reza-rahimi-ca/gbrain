@@ -397,6 +397,55 @@ describe('GoogleApiClient request core', () => {
   });
 });
 
+describe('GoogleApiClient People expired-syncToken mapping', () => {
+  const EXPIRED_MSG = 'Sync token is expired. Clear local cache and retry call without the sync token.';
+
+  test("People HTTP 400 'Sync token is expired' surfaces as GoogleCursorExpiredError (not 'upstream')", async () => {
+    let apiCalls = 0;
+    const h = makeHarness(() => {
+      apiCalls++;
+      return json({ error: { code: 400, message: EXPIRED_MSG, status: 'INVALID_ARGUMENT' } }, 400);
+    });
+    const client = new GoogleApiClient(h.tokens, h.fetchImpl);
+    let thrown: unknown;
+    try {
+      await client.fetchJSON('https://people.googleapis.com/v1/people/me/connections?syncToken=stale', 'people');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(GoogleCursorExpiredError);
+    expect((thrown as GoogleCursorExpiredError).status).toBe(400);
+    expect(apiCalls).toBe(1); // cursor expiry is the caller's to handle — no retry, no refresh
+    expect(h.tokenPosts()).toBe(0);
+  });
+
+  test('a People 400 with a different message stays a plain upstream CredentialError', async () => {
+    const h = makeHarness(() => json({ error: { code: 400, message: 'Request contains an invalid argument.' } }, 400));
+    const client = new GoogleApiClient(h.tokens, h.fetchImpl);
+    let thrown: unknown;
+    try {
+      await client.fetchJSON('https://people.googleapis.com/v1/people/me/connections', 'people');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(CredentialError);
+    expect((thrown as CredentialError).code).toBe('upstream');
+  });
+
+  test('the same message on a non-People API is NOT treated as cursor expiry', async () => {
+    const h = makeHarness(() => json({ error: { code: 400, message: EXPIRED_MSG } }, 400));
+    const client = new GoogleApiClient(h.tokens, h.fetchImpl);
+    let thrown: unknown;
+    try {
+      await client.fetchJSON('https://gmail.googleapis.com/gmail/v1/fake', 'gmail');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(CredentialError);
+    expect((thrown as CredentialError).code).toBe('upstream');
+  });
+});
+
 describe('GoogleApiClient retry exhaustion + 403 mapping', () => {
   test("always-429 (Retry-After: 0) exhausts the RATE-LIMIT retry budget (bigger than the plain retry budget) and maps to 'rate_limited'", async () => {
     let apiCalls = 0;

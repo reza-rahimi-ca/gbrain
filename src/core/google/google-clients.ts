@@ -147,6 +147,17 @@ export class GoogleApiClient {
       if (res.status === 404 || res.status === 410) {
         throw new GoogleCursorExpiredError(res.status, url);
       }
+      // People reports an expired syncToken as HTTP 400 ("Sync token is
+      // expired. Clear local cache and retry call without the sync token."),
+      // not 410 like Calendar. Surface it as cursor expiry so the contacts
+      // sweep re-lists once instead of failing every sync forever.
+      if (
+        res.status === 400 &&
+        apiHint === 'people' &&
+        /sync token is expired/i.test(body.error?.message ?? '')
+      ) {
+        throw new GoogleCursorExpiredError(res.status, url);
+      }
       throw new CredentialError('upstream', `: HTTP ${res.status} on ${apiHint} (${body.error?.message ?? 'no detail'})`);
     }
     throw new CredentialError('upstream', `: unreachable ${apiHint}`);

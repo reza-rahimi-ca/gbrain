@@ -186,6 +186,9 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   // above to the cent — OpenRouter passing DeepSeek through at vendor
   // rate, not a coincidence worth losing to an alias shortcut.
   'openrouter:deepseek/deepseek-v4-flash-0731': { input: 0.14,  output: 0.28 },
+  // Verified 2026-09-21 against the OpenRouter models API (prompt 1.5e-7,
+  // completion 6e-7 per token).
+  'openrouter:deepseek/deepseek-v4.1-flash':    { input: 0.15,  output: 0.60 },
   'openrouter:qwen/qwen3.7-flash':              { input: 0.03,  output: 0.13 },
   'openrouter:qwen/qwen3.6-plus':               { input: 0.325, output: 1.95 },
 };
