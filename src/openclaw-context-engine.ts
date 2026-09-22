@@ -6,7 +6,13 @@
  * sessions lose track of the user's current time, location, and state.
  *
  * Enable in openclaw.json:
- *   plugins.slots.contextEngine: "gbrain-context"
+ *   plugins.slots.contextEngine: "gbrain-context-engine"
+ *
+ * The slot value is a PLUGIN id on current OpenClaw hosts (2026.9+): the host
+ * force-activates the plugin named by the slot and then resolves the engine
+ * under that same id. Older hosts keyed the slot by ENGINE id
+ * (`gbrain-context`). `register()` therefore registers the engine under both
+ * ids, so either slot value activates and resolves gbrain.
  *
  * @module
  */
@@ -63,8 +69,22 @@ interface PluginCtx {
   [key: string]: unknown;
 }
 
+/** Plugin id — must match `id` in `openclaw.plugin.json`. */
+export const PLUGIN_ID = 'gbrain-context-engine';
+
+/**
+ * Every id `register()` binds the engine to. OpenClaw 2026.9+ pins
+ * `plugins.slots.contextEngine` by plugin id and looks the engine up under
+ * that id (`resolveSlotSelection` → `pluginId`; `entries.get(slot)` at turn
+ * time), so an engine registered ONLY as `gbrain-context` is never activated:
+ * the host logs `context engine "gbrain-context" is not registered` and
+ * degrades to `legacy` every turn. Older hosts keyed the slot by engine id.
+ * Registering both keeps either slot value working.
+ */
+export const REGISTERED_ENGINE_IDS: readonly string[] = [...new Set([ENGINE_ID, PLUGIN_ID])];
+
 export function register(api: PluginApi) {
-  api.registerContextEngine(ENGINE_ID, (ctx: PluginCtx) => {
+  const factory = (ctx: PluginCtx) => {
     const hostResolver =
       typeof ctx.resolveEntities === 'function'
         ? ctx.resolveEntities
@@ -75,11 +95,12 @@ export function register(api: PluginApi) {
       workspaceDir: ctx.workspaceDir,
       resolveEntities: hostResolver,
     });
-  });
+  };
+  for (const id of REGISTERED_ENGINE_IDS) api.registerContextEngine(id, factory);
 }
 
 const entry: PluginEntry = {
-  id: 'gbrain-context-engine',
+  id: PLUGIN_ID,
   name: 'GBrain Context Engine',
   description: 'Deterministic temporal/spatial context injection on every turn',
   register,

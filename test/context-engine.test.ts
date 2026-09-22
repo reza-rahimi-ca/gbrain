@@ -10,10 +10,17 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createGBrainContextEngine, ENGINE_ID, ENGINE_NAME, __resetSdkLoadStateForTests } from '../src/core/context-engine.ts';
+import {
+  createGBrainContextEngine,
+  ENGINE_ID,
+  ENGINE_NAME,
+  __resetSdkLoadStateForTests,
+  commitTurnAdvancement,
+  withCurrentTurnPrompt,
+} from '../src/core/context-engine.ts';
 
 interface WorkspaceOpts {
   heartbeat?: Record<string, unknown>;
@@ -733,5 +740,121 @@ describe('invalid configured timezone degrades instead of throwing (RangeError g
     const block = result.systemPromptAddition!;
     expect(block).toContain('home:tz-invalid');
     expect(block).toContain('Local time NOT computed');
+  });
+});
+
+// ── OpenClaw 2026.9+ durable admitted turns ──────────────────────────────
+// Without BOTH `info.transcriptSemantics` values AND a `commitTurn` method the
+// host degrades every logical turn to `legacy` ("current-turn transcript
+// fencing is not declared" / "atomic idempotent turn advancement is not
+// declared"). These pin the contract gbrain declares.
+describe('durable turn advancement (OpenClaw 2026.9+ contract)', () => {
+  let tmpDir: string;
+  let ledgerDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeWorkspace();
+    ledgerDir = join(mkdtempSync(join(tmpdir(), 'gbrain-ce-ledger-')), 'turn-advancement');
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(join(ledgerDir, '..'), { recursive: true, force: true });
+  });
+
+  it('declares the current-turn fence and atomic-idempotent advancement, and implements commitTurn', () => {
+    const engine = createGBrainContextEngine({ workspaceDir: tmpDir });
+    expect(engine.info.transcriptSemantics).toEqual({
+      currentTurnFence: 'before-current-turn-entry-v1',
+      turnAdvancementIdempotency: 'atomic-idempotent-v1',
+    });
+    expect(typeof engine.commitTurn).toBe('function');
+    // The host only treats the engine as durable when BOTH hold — see
+    // supportsContextEngineDurableTurnAdvancement in the OpenClaw host.
+    expect(engine.info.ownsCompaction).toBe(false);
+  });
+
+  it('ledger: first key commits, the same key is a duplicate, a new key commits', () => {
+    expect(commitTurnAdvancement(ledgerDir, 'sess-1', 'turn-a')).toEqual({ status: 'committed' });
+    expect(commitTurnAdvancement(ledgerDir, 'sess-1', 'turn-a')).toEqual({ status: 'duplicate' });
+    expect(commitTurnAdvancement(ledgerDir, 'sess-1', 'turn-b')).toEqual({ status: 'committed' });
+    // Keys are scoped per session: another session may reuse a key string.
+    expect(commitTurnAdvancement(ledgerDir, 'sess-2', 'turn-a')).toEqual({ status: 'committed' });
+  });
+
+  it('ledger is durable across processes: a fresh reader sees the committed key', () => {
+    expect(commitTurnAdvancement(ledgerDir, 'sess/with:odd chars', 'k1')).toEqual({ status: 'committed' });
+    const files = readdirSync(ledgerDir);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^sess-with-odd-chars\.json$/);
+    const onDisk = JSON.parse(readFileSync(join(ledgerDir, files[0]), 'utf-8'));
+    expect(onDisk.keys).toEqual(['k1']);
+    // Simulate a host retry after a crash: a brand-new call (no in-memory
+    // state) must report duplicate.
+    expect(commitTurnAdvancement(ledgerDir, 'sess/with:odd chars', 'k1')).toEqual({ status: 'duplicate' });
+  });
+
+  it('ledger is bounded and treats a corrupt file as empty (never throws)', () => {
+    mkdirSync(ledgerDir, { recursive: true });
+    writeFileSync(join(ledgerDir, 'sess-c.json'), '{not json');
+    expect(commitTurnAdvancement(ledgerDir, 'sess-c', 'k1')).toEqual({ status: 'committed' });
+    for (let i = 0; i < 600; i++) commitTurnAdvancement(ledgerDir, 'sess-c', `bulk-${i}`);
+    const onDisk = JSON.parse(readFileSync(join(ledgerDir, 'sess-c.json'), 'utf-8'));
+    expect(onDisk.keys.length).toBe(512);
+    expect(onDisk.keys[onDisk.keys.length - 1]).toBe('bulk-599');
+    // Evicted keys re-commit (host retries are recent by construction).
+    expect(commitTurnAdvancement(ledgerDir, 'sess-c', 'k1')).toEqual({ status: 'committed' });
+    // A blank key is accepted without touching the ledger.
+    expect(commitTurnAdvancement(ledgerDir, 'sess-c', '')).toEqual({ status: 'committed' });
+  });
+
+  it('ledger fails open when the directory is unwritable', () => {
+    const blocked = join(tmpDir, 'blocked-file');
+    writeFileSync(blocked, 'not a directory');
+    expect(commitTurnAdvancement(join(blocked, 'nested'), 'sess-d', 'k1')).toEqual({ status: 'committed' });
+  });
+
+  it('engine.commitTurn writes the ledger under GBRAIN_HOME', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-ce-home-'));
+    const prev = process.env.GBRAIN_HOME;
+    process.env.GBRAIN_HOME = home;
+    try {
+      const engine = createGBrainContextEngine({ workspaceDir: tmpDir });
+      const params = {
+        advancementKey: 'lt-1',
+        admission: { sessionId: 's1', entryId: 'e1' },
+        terminal: { sessionId: 's1', entryId: 'e9' },
+        messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }],
+        sessionId: 's1',
+        sessionKey: 'agent:main:test',
+      };
+      expect(await engine.commitTurn(params)).toEqual({ status: 'committed' });
+      expect(await engine.commitTurn(params)).toEqual({ status: 'duplicate' });
+      expect(existsSync(join(home, '.gbrain', 'transcripts', 'turn-advancement', 's1.json'))).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.GBRAIN_HOME; else process.env.GBRAIN_HOME = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('withCurrentTurnPrompt: fenced history (ending in an assistant turn) + prompt yields the current turn as the last user message', () => {
+    const history = [
+      { role: 'user', content: 'earlier question' },
+      { role: 'assistant', content: 'earlier answer' },
+    ];
+    const merged = withCurrentTurnPrompt(history, 'Tell me about Acme Corp');
+    expect(merged).toHaveLength(3);
+    expect(merged[2]).toEqual({ role: 'user', content: 'Tell me about Acme Corp' });
+    // Input untouched (assemble passes `messages` through unchanged).
+    expect(history).toHaveLength(2);
+    // Empty history + prompt (codex-app-server 2026.7.x shape).
+    expect(withCurrentTurnPrompt([], 'solo')).toEqual([{ role: 'user', content: 'solo' }]);
+    // Hosts that send BOTH (window already ends with the user turn): prompt
+    // is ignored, even when worded differently — no double-count.
+    const both = [...history, { role: 'user', content: 'Tell me about Acme Corp' }];
+    expect(withCurrentTurnPrompt(both, 'Tell me about Acme Corp ')).toBe(both);
+    expect(withCurrentTurnPrompt(both, 'something else entirely')).toBe(both);
+    // No prompt: untouched.
+    expect(withCurrentTurnPrompt(history, undefined)).toBe(history);
+    expect(withCurrentTurnPrompt(history, '   ')).toBe(history);
   });
 });

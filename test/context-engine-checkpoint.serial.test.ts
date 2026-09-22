@@ -160,12 +160,12 @@ describe('checkpoint compaction (cathedral 5)', () => {
     expect(noManifest.systemPromptAddition).not.toContain('Compaction checkpoint');
   });
 
-  it('CK5: ENGINE_API_VERSION is 0.3.0 and ownsCompaction stays false', async () => {
+  it('CK5: ENGINE_API_VERSION is 0.4.0 and ownsCompaction stays false', async () => {
     const { ENGINE_API_VERSION } = await import('../src/core/context-engine.ts');
-    expect(ENGINE_API_VERSION).toBe('0.3.0');
+    expect(ENGINE_API_VERSION).toBe('0.4.0');
     tmpDir = makeWorkspace();
     const engine = createGBrainContextEngine({ workspaceDir: tmpDir });
-    expect(engine.info.version).toBe('0.3.0');
+    expect(engine.info.version).toBe('0.4.0');
     expect(engine.info.ownsCompaction).toBe(false);
   });
 

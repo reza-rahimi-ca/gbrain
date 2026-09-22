@@ -243,14 +243,16 @@ describe('openclaw-plugin-load-real (Tier 2 e2e)', () => {
   );
 
   it.skipIf(SKIP)(
-    'plugins.slots.contextEngine binding to gbrain-context validates cleanly',
+    'plugins.slots.contextEngine binding to the plugin id validates cleanly',
     () => {
       // Wiring our id into the slot is the runtime hand-off — when
-      // openclaw initializes an agent, it reads this slot and resolves the
-      // engine from the contextEngine registry. config validate fails if
-      // the slot value doesn't reference a known engine.
+      // openclaw initializes an agent, it reads this slot, force-activates
+      // the PLUGIN named by it, and resolves the engine registered under
+      // that same id (the plugin entry registers ENGINE_ID and PLUGIN_ID).
+      // config validate fails if the slot value doesn't reference a known
+      // plugin.
       const setResult = runOpenclaw(
-        ['config', 'set', 'plugins.slots.contextEngine', ENGINE_ID],
+        ['config', 'set', 'plugins.slots.contextEngine', PLUGIN_ID],
         { timeoutMs: 30_000 },
       );
       expect(setResult.exitCode).toBe(0);

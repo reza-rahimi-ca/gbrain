@@ -13,8 +13,9 @@
  * @see https://docs.openclaw.ai/concepts/context-engine
  */
 
-import { readFileSync, existsSync, statSync } from 'fs';
+import { readFileSync, existsSync, statSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { atomicWriteFileSync } from './atomic-write.ts';
 import { buildReflexAddition, warmReflex, type ResolveEntitiesFn as ReflexResolveEntitiesFn } from './context/reflex.ts';
 import { backupNagReadOnlyConsult, backupNoticeText, loadBackupStatus } from './backup/status-file.ts';
 // Types inlined from openclaw/plugin-sdk to avoid hard dependency during development.
@@ -26,11 +27,50 @@ interface AgentMessage {
   [key: string]: unknown;
 }
 
+/**
+ * Host transcript semantics (OpenClaw 2026.9+ durable admitted turns). Both
+ * values must be declared AND `commitTurn` implemented, or the host runs the
+ * whole logical turn on its `legacy` engine and logs "current-turn transcript
+ * fencing is not declared" / "atomic idempotent turn advancement is not
+ * declared" on every turn.
+ */
+interface ContextEngineTranscriptSemantics {
+  /** The host fences pre-turn transcript reads before the admitted user entry; the current turn arrives via `prompt`. */
+  currentTurnFence?: 'before-current-turn-entry-v1';
+  /** `commitTurn` is one atomic, idempotent write keyed by `advancementKey`. */
+  turnAdvancementIdempotency?: 'atomic-idempotent-v1';
+}
+
 interface ContextEngineInfo {
   id: string;
   name: string;
   version?: string;
   ownsCompaction?: boolean;
+  transcriptSemantics?: ContextEngineTranscriptSemantics;
+}
+
+/** Host-owned transcript anchors — opaque to gbrain; only `sessionId` is read. */
+interface TranscriptEntryAnchor {
+  sessionId?: string;
+  entryId?: string;
+  [key: string]: unknown;
+}
+
+export interface CommitTurnParams {
+  /** Host-issued idempotency key (the logical turn id). Retried verbatim after a crash. */
+  advancementKey: string;
+  admission: TranscriptEntryAnchor;
+  terminal: TranscriptEntryAnchor;
+  /** Inclusive range from the admitted user entry through the accepted terminal entry. */
+  messages: AgentMessage[];
+  sessionId: string;
+  sessionKey?: string;
+  isHeartbeat?: boolean;
+  [key: string]: unknown;
+}
+
+export interface CommitTurnResult {
+  status: 'committed' | 'duplicate';
 }
 
 interface AssembleResult {
@@ -70,6 +110,14 @@ export interface ContextEngine {
     force?: boolean;
     [key: string]: unknown;
   }): Promise<CompactResult>;
+  /**
+   * Atomically + idempotently commit one accepted durable transcript turn
+   * (OpenClaw 2026.9+). gbrain keeps no per-turn store — the host's transcript
+   * stays canonical and `ownsCompaction` stays false — so the commit is a
+   * durable idempotency ledger keyed by `advancementKey`: first sight ⇒
+   * `committed`, a host retry of the same key ⇒ `duplicate`.
+   */
+  commitTurn(params: CommitTurnParams): Promise<CommitTurnResult>;
 }
 
 // Runtime helpers — loaded lazily on first assemble()/compact() call. The SDK
@@ -121,7 +169,11 @@ export const ENGINE_NAME = 'GBrain Context Engine';
 // `result.gbrain_checkpoint` bag from the pre-delegate checkpoint step.
 // Additive + fail-open — hosts that pass neither id simply never see the
 // block, and the compact bag rides the existing untyped `result` extension.
-export const ENGINE_API_VERSION = '0.3.0';
+// 0.4.0 (OpenClaw 2026.9 durable admitted turns): `info.transcriptSemantics`
+// declares the current-turn fence + atomic-idempotent turn advancement and
+// `commitTurn()` lands (idempotency ledger; no per-turn store). Additive —
+// older hosts never call commitTurn and ignore the declaration.
+export const ENGINE_API_VERSION = '0.4.0';
 /** @deprecated Use ENGINE_API_VERSION. Kept for back-compat with v0.32.5 callers. */
 export const ENGINE_VERSION = ENGINE_API_VERSION;
 
@@ -773,6 +825,64 @@ export function formatCheckpointBlock(links: CheckpointLinkLite[], envelope: str
  * with ':' or '/' banked a manifest the poll could never find). Charset
  * matches hook.ts's sanitizeSessionId; null when nothing safe remains.
  */
+/**
+ * The message window the Retrieval Reflex scans for THIS turn. Two host
+ * shapes deliver the current user turn outside `messages`: (a) an empty
+ * `messages` array with the text in `prompt` (codex-app-server 2026.7.x), and
+ * (b) the 2026.9+ current-turn fence, where `messages` is the history BEFORE
+ * the admitted user entry and the entry itself rides `prompt`. In both cases
+ * a user turn is synthesized from `prompt` unless the last message already
+ * carries that exact text (hosts that send both). Returned messages are for
+ * scanning only — `assemble()` still passes `messages` through unchanged.
+ */
+export function withCurrentTurnPrompt(messages: AgentMessage[], prompt: unknown): AgentMessage[] {
+  if (typeof prompt !== 'string' || !prompt.trim()) return messages;
+  // A window that already ENDS with a user turn carries the current turn
+  // itself (pre-fence hosts send both); `prompt` is then ignored so a
+  // differently-worded prompt can never double-count or displace it.
+  const last = messages[messages.length - 1];
+  if (last && last.role === 'user') return messages;
+  return [...messages, { role: 'user', content: prompt }];
+}
+
+/** Bounded per-session ledger size: a host retries only recent keys. */
+const TURN_ADVANCEMENT_LEDGER_MAX_KEYS = 512;
+
+/**
+ * Durable idempotency ledger behind `commitTurn`. One small JSON file per
+ * (sanitized) session under `<gbrain home>/transcripts/turn-advancement/`,
+ * written atomically (tmp + rename) so a crash mid-write can never leave a
+ * half-parsed file; a corrupt/missing file reads as empty. Never throws:
+ * gbrain has no per-turn state to protect, so a ledger I/O failure records
+ * nothing and reports `committed` (the host deletes its outbox row and moves
+ * on) rather than leaving the turn queued and degrading every next turn.
+ */
+export function commitTurnAdvancement(ledgerDir: string, sessionId: unknown, advancementKey: unknown): CommitTurnResult {
+  const key = typeof advancementKey === 'string' ? advancementKey.trim() : '';
+  const sid = sanitizeEngineSessionId(sessionId) ?? 'unknown-session';
+  if (!key) return { status: 'committed' };
+  try {
+    mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
+    const file = join(ledgerDir, `${sid}.json`);
+    let keys: string[] = [];
+    if (existsSync(file)) {
+      try {
+        const parsed = JSON.parse(readFileSync(file, 'utf-8')) as { keys?: unknown };
+        if (Array.isArray(parsed?.keys)) keys = parsed.keys.filter((k): k is string => typeof k === 'string');
+      } catch {
+        keys = [];
+      }
+    }
+    if (keys.includes(key)) return { status: 'duplicate' };
+    keys.push(key);
+    if (keys.length > TURN_ADVANCEMENT_LEDGER_MAX_KEYS) keys = keys.slice(-TURN_ADVANCEMENT_LEDGER_MAX_KEYS);
+    atomicWriteFileSync(file, JSON.stringify({ version: 1, keys }));
+    return { status: 'committed' };
+  } catch {
+    return { status: 'committed' };
+  }
+}
+
 export function sanitizeEngineSessionId(raw: unknown): string | null {
   if (typeof raw !== 'string' || !raw) return null;
   const s = raw.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 120);
@@ -1149,6 +1259,14 @@ export function createGBrainContextEngine(ctx: {
       name: ENGINE_NAME,
       version: ENGINE_API_VERSION,
       ownsCompaction: false,  // delegate to legacy runtime
+      // OpenClaw 2026.9+: without BOTH declarations (+ commitTurn) the host
+      // degrades every logical turn to `legacy`. gbrain reads the current turn
+      // from `prompt` under the fence (see withCurrentTurnPrompt) and commits
+      // through an idempotency ledger (see commitTurnAdvancement).
+      transcriptSemantics: {
+        currentTurnFence: 'before-current-turn-entry-v1',
+        turnAdvancementIdempotency: 'atomic-idempotent-v1',
+      },
     } satisfies ContextEngineInfo,
 
     async ingest({ message }) {
@@ -1165,15 +1283,12 @@ export function createGBrainContextEngine(ctx: {
       // take down the whole context pipeline.
       const msgs = Array.isArray(messages) ? messages : [];
 
-      // Some OpenClaw runtimes (e.g. the codex-app-server in 2026.7.x) deliver
-      // the current user turn via `prompt` with an empty `messages` array.
-      // Synthesize a single user turn so the Retrieval Reflex still sees the
-      // text (the deterministic live-context/pass-through path is unaffected).
-      const effectiveMessages = msgs.length > 0
-        ? msgs
-        : (typeof prompt === 'string' && prompt.trim()
-            ? ([{ role: 'user', content: prompt }] as typeof msgs)
-            : msgs);
+      // The current user turn may arrive via `prompt` rather than `messages`:
+      // codex-app-server 2026.7.x sends an empty array, and the 2026.9+
+      // current-turn fence sends the history BEFORE the admitted entry. Merge
+      // it in for the Retrieval Reflex scan (the deterministic live-context
+      // and the pass-through of `messages` are unaffected).
+      const effectiveMessages = withCurrentTurnPrompt(msgs, prompt);
 
       // 1. Generate deterministic context (<5ms, zero LLM calls)
       const liveCtx = generateLiveContext(workspaceDir);
@@ -1296,6 +1411,27 @@ export function createGBrainContextEngine(ctx: {
         ...delegated,
         result: { ...(delegated.result ?? {}), gbrain_checkpoint: gbrainCheckpoint },
       };
+    },
+
+    async commitTurn(params) {
+      // No per-turn store to advance (ingest is a no-op, the host transcript
+      // stays canonical) — honor the atomic-idempotent contract via the
+      // durable ledger. Never throws: a thrown commit keeps the host's outbox
+      // row pending and degrades the NEXT turn to legacy.
+      let dir: string;
+      try {
+        const { ensureGbrainHome, resolveGbrainHome } = await import('./gbrain-home.ts');
+        let home: string;
+        try {
+          home = ensureGbrainHome();
+        } catch {
+          home = resolveGbrainHome();
+        }
+        dir = join(home, 'transcripts', 'turn-advancement');
+      } catch {
+        return { status: 'committed' };
+      }
+      return commitTurnAdvancement(dir, params?.sessionId ?? params?.admission?.sessionId, params?.advancementKey);
     },
   };
 

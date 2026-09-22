@@ -30,6 +30,7 @@ mock.module('openclaw/plugin-sdk/core', () => ({
 }));
 
 import pluginEntry from '../../src/openclaw-context-engine.ts';
+import { PLUGIN_ID, REGISTERED_ENGINE_IDS } from '../../src/openclaw-context-engine.ts';
 import { ENGINE_ID, __resetSdkLoadStateForTests } from '../../src/core/context-engine.ts';
 
 interface PluginEntryShape {
@@ -44,13 +45,14 @@ describe('openclaw-context-engine plugin entry', () => {
     const entry = pluginEntry as PluginEntryShape;
     expect(entry).toBeDefined();
     expect(entry.id).toBe('gbrain-context-engine');
+    expect(entry.id).toBe(PLUGIN_ID);
     expect(entry.name).toBe('GBrain Context Engine');
     expect(typeof entry.description).toBe('string');
     expect(entry.description.length).toBeGreaterThan(0);
     expect(typeof entry.register).toBe('function');
   });
 
-  it('register() wires registerContextEngine with ENGINE_ID and a factory', () => {
+  it('register() wires registerContextEngine under ENGINE_ID and the plugin-id alias', () => {
     type RegisterCall = { id: string; factory: (ctx: { workspaceDir: string }) => unknown };
     const calls: RegisterCall[] = [];
     const stubApi = {
@@ -61,9 +63,14 @@ describe('openclaw-context-engine plugin entry', () => {
 
     (pluginEntry as PluginEntryShape).register(stubApi);
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0].id).toBe(ENGINE_ID);
-    expect(typeof calls[0].factory).toBe('function');
+    // OpenClaw 2026.9+ resolves `plugins.slots.contextEngine` as a PLUGIN id
+    // and looks the engine up under that id; older hosts used the engine id.
+    // Both ids must be bound to the same factory or one of them degrades to
+    // `legacy` with "context engine ... is not registered" on every turn.
+    expect(calls.map((c) => c.id)).toEqual([ENGINE_ID, PLUGIN_ID]);
+    expect(calls.map((c) => c.id)).toEqual([...REGISTERED_ENGINE_IDS]);
+    expect(new Set(calls.map((c) => c.factory)).size).toBe(1);
+    for (const call of calls) expect(typeof call.factory).toBe('function');
   });
 
   it('factory returns a working ContextEngine bound to the workspace', async () => {
