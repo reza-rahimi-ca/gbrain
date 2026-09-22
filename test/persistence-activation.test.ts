@@ -61,6 +61,15 @@ test('activation requires explicit quiescence and a complete owner binding witho
   expect(await managedPersistenceEnabled(engine)).toBe(false);
 }), 60_000);
 
+test('activation refuses while a connector source is registered', () => fixture(async (engine, root, _home, sourceId) => {
+  await claimWorktree(engine, sourceId, root);
+  const connector = `${sourceId}-google`;
+  await engine.executeRaw(`INSERT INTO sources(id,name,config) VALUES($1,$1,'{"kind":"google"}'::jsonb)`, [connector]);
+  await expect(activatePersistence(engine, { confirmQuiesced: true, dryRun: true })).rejects.toMatchObject({ code: 'writer_coordinator_required' });
+  await expect(activatePersistence(engine, { confirmQuiesced: true })).rejects.toMatchObject({ code: 'writer_coordinator_required' });
+  expect(await managedPersistenceEnabled(engine)).toBe(false);
+}), 60_000);
+
 test('activation refuses busy native roots and even expired legacy leases', () => fixture(async (engine, root, _home, sourceId) => {
   const binding = await claimWorktree(engine, sourceId, root);
   const lock = (await acquireWorktree(binding))!;

@@ -50,6 +50,14 @@ async function validatedBindings(engine: BrainEngine, sources: SourceRoot[], hos
 export async function activatePersistence(engine: BrainEngine, opts: { confirmQuiesced?: boolean; dryRun?: boolean } = {}): Promise<ActivationReport> {
   if (opts.confirmQuiesced !== true) throw quiescence();
   if (Number(await engine.getConfig('version')) < 157) throw new OperationError('writer_upgrade_required', 'Apply the canonical writer guard, outbox, and source lifecycle migrations before activation.');
+  // Connector sources (google/github) have no managed coordinator yet: managed
+  // sync rejects them and their materializers refuse the legacy writer, so an
+  // activation with one registered silently stops that source's ingestion.
+  const connectors = await engine.executeRaw<{ id: string; kind: string }>(
+    `SELECT id, config->>'kind' AS kind FROM sources WHERE archived=false AND config->>'kind' IS NOT NULL ORDER BY id`);
+  if (connectors.length) throw new OperationError('writer_coordinator_required',
+    `Managed activation is unavailable while connector sources are registered: ${connectors.map(c => `${c.id} (${c.kind})`).join(', ')}. Connector materialization has no managed coordinator yet, so activation would stop their sync.`,
+    'Keep the brain unmanaged until connector sources are supported, or archive those sources first.');
   const native = await nativeLockCapability();
   const probe = await tryAcquireNativeLock(join(persistenceHome(), 'locks', 'activation-probe.lock'));
   if (!probe) throw new OperationError('writer_lock_unavailable', 'Another activation probe is running.');
