@@ -54,6 +54,19 @@ async function registrationGrant(engine: BrainEngine, params: Record<string, unk
   return { sourceIds, scopes, operations, slugPrefixes };
 }
 
+/**
+ * Worktree bindings carry int8 `owner_epoch` / `topology_generation`, which the
+ * pg driver returns as native BigInt (PGLite returns numbers). Admin results are
+ * JSON.stringify()'d by the CLI and MCP layers, and BigInt is not serializable —
+ * render both as decimal strings, the same shape diagnostics.ts emits.
+ */
+function serializableBinding<T extends { owner_epoch?: unknown; topology_generation?: unknown } | null>(binding: T): T {
+  if (!binding) return binding;
+  return { ...binding,
+    ...(binding.owner_epoch !== undefined ? { owner_epoch: String(binding.owner_epoch) } : {}),
+    ...(binding.topology_generation !== undefined ? { topology_generation: String(binding.topology_generation) } : {}) };
+}
+
 export async function runPersistenceAdministration(engine: BrainEngine, operation: PersistenceAdminOperation,
   params: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (operation === 'writer_sync') return (await import('./sync-administration.ts')).runAuthenticatedSyncSlice(engine, params);
@@ -87,8 +100,11 @@ export async function runPersistenceAdministration(engine: BrainEngine, operatio
     keys(params, ['source_id', 'probe']);
     if (params.probe !== undefined && typeof params.probe !== 'boolean') throw invalid('probe must be a boolean.');
     const diagnostics = await writerDiagnostics(engine);
-    const bindings = await engine.executeRaw(`SELECT b.source_id,b.source_incarnation,b.worktree_id,b.relative_path,b.topology_generation,
-      w.owner_host_id,w.owner_epoch,w.state,w.manifest->>'digest' AS manifest_digest,h.local_path FROM persistence_source_bindings b
+    // int8 columns arrive as native BigInt from the pg driver (PGLite hands
+    // back numbers), and the CLI JSON.stringify()s this result — cast to text
+    // in SQL like diagnostics.ts does so Postgres and PGLite agree.
+    const bindings = await engine.executeRaw(`SELECT b.source_id,b.source_incarnation,b.worktree_id,b.relative_path,b.topology_generation::text AS topology_generation,
+      w.owner_host_id,w.owner_epoch::text AS owner_epoch,w.state,w.manifest->>'digest' AS manifest_digest,h.local_path FROM persistence_source_bindings b
       JOIN persistence_worktrees w ON w.id=b.worktree_id
       LEFT JOIN persistence_host_bindings h ON h.worktree_id=b.worktree_id AND h.host_id=$1::uuid
       WHERE ($2::text IS NULL OR b.source_id=$2) ORDER BY b.source_id`, [localHostId(), params.source_id === undefined ? null : source(params.source_id)]);
@@ -106,8 +122,8 @@ export async function runPersistenceAdministration(engine: BrainEngine, operatio
   if (operation === 'writer_claim') {
     keys(params, ['source_id', 'path', 'dry_run']);
     const sourceId = source(params.source_id), root = path(params.path);
-    if (params.dry_run) return { dry_run: true, action: operation, source_id: sourceId, path: root, current: await getWorktreeBinding(engine, sourceId) };
-    return { claimed: true, binding: await claimWorktree(engine, sourceId, root) };
+    if (params.dry_run) return { dry_run: true, action: operation, source_id: sourceId, path: root, current: serializableBinding(await getWorktreeBinding(engine, sourceId)) };
+    return { claimed: true, binding: serializableBinding(await claimWorktree(engine, sourceId, root)) };
   }
   if (operation === 'writer_activate') {
     keys(params, ['confirm_quiesced', 'dry_run']);
@@ -123,10 +139,10 @@ export async function runPersistenceAdministration(engine: BrainEngine, operatio
       const binding = await getWorktreeBinding(engine, sourceId);
       if (!binding || binding.owner_host_id !== localHostId() || !binding.local_path) throw new OperationError('permission_denied', 'Only the current owner can prepare a transfer.');
       const manifest = worktreeManifest(binding.local_path);
-      return { dry_run: true, action: operation, binding, manifest: { digest: manifest.digest, file_count: Object.keys(manifest.files).length } };
+      return { dry_run: true, action: operation, binding: serializableBinding(binding), manifest: { digest: manifest.digest, file_count: Object.keys(manifest.files).length } };
     }
     const prepared = await prepareWriterTransfer(engine, sourceId);
-    return { prepared: true, source_id: sourceId, worktree_id: prepared.worktree_id, owner_epoch: prepared.owner_epoch,
+    return { prepared: true, source_id: sourceId, worktree_id: prepared.worktree_id, owner_epoch: String(prepared.owner_epoch),
       manifest: { digest: prepared.manifest.digest, file_count: Object.keys(prepared.manifest.files).length } };
   }
   if (operation === 'writer_transfer_accept') {
