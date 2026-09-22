@@ -9,6 +9,7 @@ import { authorizeStoredRequest, submissionAuthority } from './authority.ts';
 import { admitWrite, admitWriteInTransaction, assertPageRequestIdentity, assertReplayIntent, completeWrite, getWriteRequest, intentDigest } from './journal.ts';
 import { assertPersistenceAccepting, registerMutationPreparer, waitForWrite, writeResponse } from './service.ts';
 import { claimWorktree, getWorktreeBinding } from './ownership.ts';
+import { UNMANAGED_NO_OWNER, mirrorUnmanagedWrite, unownedWriteFallsBackToLegacy } from './unmanaged-mirror.ts';
 import { parseMutationPrecondition } from './preconditions.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
@@ -46,7 +47,7 @@ async function submission(ctx: OperationContext, operation: string, params: Reco
 export async function submitRememberMutation(ctx: OperationContext, params: Record<string, unknown>, waitMs?: number): Promise<Record<string, unknown>> {
   registerMutationPreparer('remember', prepareMemoryMutation);
   const sub = await submission(ctx, 'remember', params);
-  if (sub.prior) return writeResponse(await waitForWrite(ctx.engine, sub.prior, ctx.config, waitMs));
+  if (sub.prior) return writeResponse(await mirrorUnmanagedWrite(ctx.engine, await waitForWrite(ctx.engine, sub.prior, ctx.config, waitMs)));
   const { p, sourceId, principal, callerIntent, requestId } = sub;
   const [source] = await ctx.engine.executeRaw<{ incarnation: string; archived: boolean; local_path: string | null }>(
     'SELECT incarnation,archived,local_path FROM sources WHERE id=$1', [sourceId]);
@@ -79,14 +80,15 @@ export async function submitRememberMutation(ctx: OperationContext, params: Reco
   else if (!configuredWriteThrough) authority.databaseOnlyReason = 'disabled_by_config';
   const root = source.local_path || (sourceId === 'default' ? await ctx.engine.getConfig('sync.repo_path') : null);
   if (fence && writeThrough && root && !binding) {
-    if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.');
-    binding = await claimWorktree(ctx.engine, sourceId, root);
+    if (await unownedWriteFallsBackToLegacy(ctx.engine)) authority.databaseOnlyReason = UNMANAGED_NO_OWNER;
+    else if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.');
+    else binding = await claimWorktree(ctx.engine, sourceId, root);
   }
   const row = await admitWrite(ctx.engine, { principal, operation: 'remember', sourceId, sourceIncarnation: source.incarnation,
     slug, pageId: snapshot?.page.id ?? null, requestId, callerIntent,
     intent: { ...callerIntent, entity_slug: entitySlug, fence, valid_from: new Date().toISOString(), valid_until: validUntil?.toISOString() ?? null },
     authority, worktreeId: writeThrough ? binding?.worktree_id : null, topologyGeneration: writeThrough ? binding?.topology_generation : null });
-  return writeResponse(await waitForWrite(ctx.engine, row, ctx.config, waitMs));
+  return writeResponse(await mirrorUnmanagedWrite(ctx.engine, await waitForWrite(ctx.engine, row, ctx.config, waitMs)));
 }
 
 interface WithdrawalTarget { id: number; entity_slug: string | null; source_markdown_slug: string | null; expired_at: Date | null; }

@@ -18,6 +18,7 @@ import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
 import { queuePublicationEffects } from './effect-journal.ts';
 import { authorizePageVisibility } from './page-visibility.ts';
 import { withNoRepoWriteThroughWarning } from '../write-through.ts';
+import { mirrorUnmanagedWrite } from './unmanaged-mirror.ts';
 import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, recoveryStagingFile, upgradeRecoveryStaging } from './staging.ts';
 
 export interface PreparedMutation {
@@ -183,7 +184,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     });
     await hooks.boundary?.('after_commit', done);
     await clearResolvedRecovery(engine, row.id);
-    return done;
+    return await mirrorUnmanagedWrite(engine, done);
   } catch (error) {
     if (recovery) {
       // Even a rejected prepare can retain a journal record; do not leave that

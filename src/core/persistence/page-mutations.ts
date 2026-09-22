@@ -11,6 +11,7 @@ import { admitWrite, assertPageRequestIdentity, assertReplayIntent, getWriteRequ
 import { submissionAuthority, authorizeStoredRequest } from './authority.ts';
 import { currentVerifiedLocalWriter, localHostId, readLocalWriter, registerLocalWriter } from './identity.ts';
 import { claimWorktree, getWorktreeBinding } from './ownership.ts';
+import { UNMANAGED_NO_OWNER, mirrorUnmanagedWrite, unownedWriteFallsBackToLegacy } from './unmanaged-mirror.ts';
 import { parseMutationPrecondition } from './preconditions.ts';
 import { assertPurgeParams } from './purge-params.ts';
 import type { Principal } from './model.ts';
@@ -53,7 +54,7 @@ export async function submitPageMutation(ctx: OperationContext,
     await submissionAuthority(ctx, prior.operation, prior.source_id, prior.source_incarnation, prior.slug);
     await authorizeStoredRequest(ctx.engine, prior);
     assertReplayIntent(prior, intentDigest({ operation: input.operation, sourceId, slug: prior.slug, callerIntent }));
-    return writeResponse(await waitForWrite(ctx.engine, prior, ctx.config, input.waitMs));
+    return writeResponse(await mirrorUnmanagedWrite(ctx.engine, await waitForWrite(ctx.engine, prior, ctx.config, input.waitMs)));
   }
   if (input.operation === 'delete_page') assertPurgeParams(p, ctx.remote);
   const [source] = await ctx.engine.executeRaw<{ incarnation: string; archived: boolean; local_path: string | null }>(
@@ -114,11 +115,12 @@ export async function submitPageMutation(ctx: OperationContext,
       'Register the source canonical path, then omit --dir or use that same path.');
   }
   if (writeThrough && root && !binding) {
-    if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.', 'Register its owner with sources writer claim before accepting writes.');
-    binding = await claimWorktree(ctx.engine, sourceId, root);
+    if (await unownedWriteFallsBackToLegacy(ctx.engine)) authority.databaseOnlyReason = UNMANAGED_NO_OWNER;
+    else if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.', 'Register its owner with sources writer claim before accepting writes.');
+    else binding = await claimWorktree(ctx.engine, sourceId, root);
   }
   const row = await admitWrite(ctx.engine, { principal, operation: input.operation, sourceId, sourceIncarnation: source.incarnation,
     slug, pageId: snapshot?.page.id ?? null, requestId, callerIntent, intent, authority,
     worktreeId: writeThrough ? binding?.worktree_id : null, topologyGeneration: writeThrough ? binding?.topology_generation : null });
-  return writeResponse(await waitForWrite(ctx.engine, row, ctx.config, input.waitMs));
+  return writeResponse(await mirrorUnmanagedWrite(ctx.engine, await waitForWrite(ctx.engine, row, ctx.config, input.waitMs)));
 }

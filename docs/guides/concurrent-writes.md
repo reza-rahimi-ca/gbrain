@@ -239,6 +239,13 @@ Nested sources in a shared worktree share its coordination lock. A stale
 heartbeat is diagnostic information; it never authorizes taking ownership.
 Filesystem-dependent work waits for its owner while database reads continue.
 
+A Postgres brain that has never activated managed mode does not need a claimed
+owner to accept agent writes. When no worktree is claimed for the source, the
+request commits database-only and the page file is mirrored afterwards by the
+legacy write-through; the receipt's `write_through` carries the mirror result
+with `mirror: legacy_unmanaged`. Claim an owner only as part of a full managed
+activation, because the claim's owner markers fence the legacy sync writers.
+
 To move a root, prepare on its current owner and retain the returned epoch and
 manifest digest. Copy the complete canonical worktree to the successor, then
 accept there with the exact epoch and digest:
