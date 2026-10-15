@@ -1,3 +1,4 @@
+import { createFetchPacer, resolveGmailFetchGapMs } from './fetch-pacer.ts';
 import { withConnectorSync, rethrowConnectorWriteError, pendingConnectorResult, type ManagedConnectorSync } from '../persistence/connector-sync.ts';
 import { resolveGoogleAccount } from '../persistence/connector-account.ts';
 import { ConnectorHoldSession, connectorHoldsResult } from '../connectors/connector-hold-session.ts';
@@ -161,14 +162,13 @@ function loopRecoveryState(state: GoogleSourceState): Record<string, unknown> {
 const BACKFILL_BATCH_THREADS = 25;
 
 async function processThread(
-  deps: GoogleSyncDeps,
-  gmail: GmailClient,
+  g: GmailSweep,
   threadId: string,
-  activePack: ActivePack,
-  summary: GoogleSyncSummary,
-  countedSlugs: Set<string>,
   seen: { thread?: GmailThreadData } = {},
 ): Promise<GmailThreadData | null> {
+  const { deps, gmail, activePack, summary, countedSlugs } = g;
+  await g.pace(deps.opts.signal);
+  deps.opts.signal?.throwIfAborted();
   const thread = await gmail.getThread(threadId, deps.cfg.account, {
     ...(deps.opts.signal ? { signal: deps.opts.signal } : {}),
   });
@@ -243,6 +243,7 @@ const fitsPendingCap = (ids: readonly string[]) => ids.length <= gmailPendingCap
 type WalkOutcome = 'done' | 'failed' | 'aborted' | 'more';
 
 interface GmailSweep {
+  pace: (signal?: AbortSignal) => Promise<void>;
   deps: GoogleSyncDeps;
   gmail: GmailClient;
   state: GoogleSourceState;
@@ -267,7 +268,7 @@ async function attemptThread(g: GmailSweep, tid: string, version: string | null)
   }
   const seen: { thread?: GmailThreadData } = {};
   try {
-    const thread = await processThread(g.deps, g.gmail, tid, g.activePack, g.summary, g.countedSlugs, seen);
+    const thread = await processThread(g, tid, seen);
     g.holds.succeed(tid);
     const newestMs = thread?.messages[thread.messages.length - 1]?.internalDateMs ?? 0;
     if (newestMs > (g.state.gmail_newest_ms ?? 0)) g.state.gmail_newest_ms = newestMs;
@@ -453,7 +454,7 @@ async function settleGraceHolds(g: GmailSweep): Promise<'aborted' | void> {
   const settled = await settleDueGraceHolds({ engine: deps.engine, sourceId: deps.sourceId, state, log: deps.log, signal: deps.opts.signal,
     exclusion: deps.exclusion, processed: deps.processedThreads, refetch: async (tid) => {
       try {
-        await processThread(deps, g.gmail, tid, g.activePack, g.summary, g.countedSlugs);
+        await processThread(g, tid);
         return 'ok';
       } catch (e) {
         if (e instanceof GoogleCursorExpiredError && e.status === 404) return 'gone';
@@ -832,7 +833,7 @@ async function runGoogleSyncInner(engine: BrainEngine, sourceId: string, cfg: Go
         // sweepGmail reports thread-level failures via its return value —
         // they exit through normal returns, not throws, and stamping
         // last_sync_at over them would blind the staleness gate (H1).
-        gmailSweepOk = await sweepGmail({ deps, gmail, state, activePack, summary, countedSlugs, holds }, async () => {
+        gmailSweepOk = await sweepGmail({ deps, gmail, state, activePack, summary, countedSlugs, holds, pace: createFetchPacer(resolveGmailFetchGapMs()) }, async () => {
           // #5581: current mail is complete but the backfill is not: bank freshness now, while the managed lease can still write.
           if (managed && summary.status !== 'partial' && !opts.signal?.aborted) {
             await managed.saveState(state, true, new Date(state.gmail_newest_ms ?? Date.now()).toISOString());

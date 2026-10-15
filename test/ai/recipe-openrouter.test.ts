@@ -41,13 +41,13 @@ describe('recipe: openrouter', () => {
     expect(r!.auth_env?.optional).toContain('OPENROUTER_TITLE');
   });
 
-  test('2. embedding touchpoint declares Matryoshka dims + 300K aggregate budget', () => {
+  test('2. embedding touchpoint declares Voyage Matryoshka dims + 120K aggregate budget', () => {
     const r = getRecipe('openrouter')!;
     expect(r.touchpoints.embedding).toBeDefined();
     const e = r.touchpoints.embedding!;
     expect(e.models[0]).toBe('openai/text-embedding-3-small');
-    expect(e.dims_options).toEqual([512, 768, 1024, 1536]);
-    expect(e.max_batch_tokens).toBe(300_000);
+    expect(e.dims_options).toEqual([256, 512, 1024, 2048]);
+    expect(e.max_batch_tokens).toBe(120_000);
   });
 
   test('2b. #4114 — per-model dims for the documented catalog; unlisted ids resolve to 0 (explicit dims required)', () => {

@@ -197,9 +197,9 @@ export const openrouterCompatFetch = (async (
  *   openrouter:anthropic/claude-sonnet-4.6
  *   openrouter:google/gemini-3-flash-preview
  *
- * Embeddings: OpenRouter exposes `/v1/embeddings` proxying OpenAI's
- * text-embedding-3-small (1536 dims) plus Matryoshka shrink via the SDK's
- * `dimensions` field. Catalog also includes text-embedding-3-large,
+ * Embeddings: OpenRouter exposes `/v1/embeddings`; this fork defaults to
+ * voyageai/voyage-4 at 1024 dimensions. Explicit OpenAI routes retain their
+ * own widths, and the SDK's `dimensions` field selects supported shrink steps. Catalog also includes text-embedding-3-large,
  * google/gemini-embedding-2-preview, qwen3-embedding-8b, and bge-m3 — users
  * opt in via `--embedding-model openrouter:<id>` (openai-compat tier accepts
  * arbitrary IDs at the gateway; recipe lists are advisory, not enforcing).
@@ -211,7 +211,7 @@ export const openrouterCompatFetch = (async (
  * specific model, check https://openrouter.ai/models.
  *
  * Reranker: `/api/v1/rerank` proxies cross-encoder rerankers (Cohere v3.5/4-fast/4-pro
- * and NVIDIA Nemotron VL). Wire shape matches `gateway.rerank()`:
+ * NVIDIA Nemotron VL, and Voyage 2.5). Wire shape matches `gateway.rerank()`:
  * `{ query, documents, model }` → `{ results: [{ index, relevance_score }] }`.
  * Unlike embedding/chat, the reranker path strictly enforces the `models`
  * allowlist (no openai-compat bypass) — adding new rerank models requires a
@@ -274,7 +274,8 @@ export const openrouter: Recipe = {
   },
   touchpoints: {
     embedding: {
-      models: ['openai/text-embedding-3-small'],
+      models: ['openai/text-embedding-3-small', 'voyageai/voyage-4', 'voyageai/voyage-4-large', 'voyageai/voyage-4-lite'],
+      default_model: 'voyageai/voyage-4',
       // #4114: per-model native dims for the catalog the docs invite users to
       // pick. The old recipe-wide `default_dims: 1536` was only right for
       // text-embedding-3-small — `migrate embeddings --to openrouter:bge-m3`
@@ -290,21 +291,22 @@ export const openrouter: Recipe = {
         'qwen/qwen3-embedding-8b': 4096,
         'bge-m3': 1024,
         'baai/bge-m3': 1024,
+        'voyageai/voyage-4': 1024,
+        'voyageai/voyage-4-large': 1024,
+        'voyageai/voyage-4-lite': 1024,
       },
       // OpenRouter proxies arbitrary embedding models with widths we cannot
       // know ahead of time; 0 = no silent default for unlisted ids.
       default_dims: 0,
       trust_custom_dims: true,
-      // text-embedding-3-small was trained at MRL breakpoints 512/1024/1536
-      // (Weaviate analysis); 768 is a practical intermediate. Users opt into
-      // a smaller dim via `gbrain config set embedding_dimensions <N>`.
-      dims_options: [512, 768, 1024, 1536],
-      cost_per_1m_tokens_usd: 0.02,
-      price_last_verified: '2026-05-20',
-      // OpenAI's published per-request aggregate is ~300K tokens for embeddings
-      // (per-input cap is 8192). This is the AGGREGATE budget the gateway uses
-      // to pre-split batches, NOT per-input. Per-input is enforced upstream.
-      max_batch_tokens: 300_000,
+      // The canonical Voyage model supports these widths. Other routed
+      // models can still declare their own width through trust_custom_dims.
+      dims_options: [256, 512, 1024, 2048],
+      cost_per_1m_tokens_usd: 0.06,
+      price_last_verified: '2026-10-15',
+      // Use Voyage's 120K aggregate cap for the canonical model. This also
+      // stays within OpenAI's larger batch limit; per-input limits stay upstream.
+      max_batch_tokens: 120_000,
     },
     // Expansion uses the same routed OpenAI-compatible language-model endpoint
     // as chat. Keep a small cheap/fast advisory set; the openai-compat tier
@@ -346,6 +348,8 @@ export const openrouter: Recipe = {
     },
     reranker: {
       models: [
+        'voyageai/rerank-2.5',
+        'voyageai/rerank-2.5-lite',
         'cohere/rerank-v3.5',
         'cohere/rerank-4-fast',
         'cohere/rerank-4-pro',

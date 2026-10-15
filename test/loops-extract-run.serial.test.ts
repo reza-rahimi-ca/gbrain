@@ -20,11 +20,14 @@ import { describe, test, expect, beforeAll, afterAll, mock, spyOn } from 'bun:te
 
 // ── Gateway mock (must precede every import that can reach ai/gateway.ts) ──
 interface ChatReq {
+  model?: string;
+  providerOptions?: Record<string, Record<string, unknown>>;
   system?: string;
   messages?: Array<{ role: string; content: string }>;
   maxTokens?: number;
 }
 let chatAvailable = true;
+let availableOverride: string | undefined;
 let chatCalls = 0;
 let lastChatReq: ChatReq | null = null;
 let chatImpl: () => Promise<{ text: string; stopReason: string }> = async () => ({
@@ -33,7 +36,7 @@ let chatImpl: () => Promise<{ text: string; stopReason: string }> = async () => 
 });
 
 mock.module('../src/core/ai/gateway.ts', () => ({
-  isAvailable: (touchpoint: string) => (touchpoint === 'chat' ? chatAvailable : false),
+  isAvailable: (touchpoint: string, model?: string) => (touchpoint === 'chat' ? (model ? model === availableOverride : chatAvailable) : false),
   chat: async (req: ChatReq) => {
     chatCalls++;
     lastChatReq = req;
@@ -158,6 +161,28 @@ describe('isLoopsExtractionEnabled', () => {
 });
 
 describe('runLoopsExtract', () => {
+  test('judge override gates and calls the same model, retaining bounded output', async () => {
+    const model = 'openrouter:deepseek/deepseek-v4.1-flash';
+    chatAvailable = false;
+    availableOverride = model;
+    await engine.setConfig('loops.extraction_model', model);
+    try {
+      await runLoopsExtract(engine, { slug: EMAIL_SLUG, sourceId: SRC });
+      expect(lastChatReq?.model).toBe(model);
+      expect(lastChatReq?.providerOptions).toEqual({ openrouter: { reasoningEffort: 'none' } });
+      expect(lastChatReq?.maxTokens).toBe(2048);
+      availableOverride = undefined;
+      chatAvailable = true;
+      const before = chatCalls;
+      await expect(runLoopsExtract(engine, { slug: EMAIL_SLUG, sourceId: SRC })).rejects.toThrow('unavailable');
+      expect(chatCalls).toBe(before);
+    } finally {
+      await engine.setConfig('loops.extraction_model', '');
+      availableOverride = undefined;
+      chatAvailable = true;
+    }
+  });
+
   test('kill switch: extraction disabled → skipped, no LLM call', async () => {
     await engine.setConfig('loops.extraction_enabled', 'false');
     const before = chatCalls;

@@ -25,6 +25,7 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import { getLoopsExtractionModel, loopsJudgeProviderOptions } from './loops-model.ts';
 import { managedFactWritePreflight } from '../facts/managed-fact-write.ts';
 import { loadSuppressions, upsertOpenLoop, type LoopType } from '../loops/loops-store.ts';
 import { isCalendarSystemMail, isNoiseSender, sha8 } from './google-render.ts';
@@ -375,7 +376,8 @@ export async function runLoopsExtract(
   // Keyless install / provider outage: NOT a skip. The sweep already refuses to
   // enqueue while chat is unavailable; a job that reaches here mid-outage must
   // fail visibly and retry, or its revision is never extracted (see the class).
-  if (!isAvailable('chat')) {
+  const judgeModel = await getLoopsExtractionModel(engine);
+  if (!isAvailable('chat', judgeModel)) {
     throw new LoopsExtractRetryableError(
       'llm_unavailable',
       'loops_extract: chat provider unavailable (no configured chat model / API key) — retryable',
@@ -395,6 +397,8 @@ export async function runLoopsExtract(
   try {
     const call = (maxTokens: number) =>
       chat({
+        ...(judgeModel ? { model: judgeModel } : {}),
+        ...loopsJudgeProviderOptions(judgeModel),
         system: JUDGE_SYSTEM,
         messages: [
           {

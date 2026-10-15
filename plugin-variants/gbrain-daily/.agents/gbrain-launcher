@@ -21,6 +21,17 @@
 
 set -eu
 
+# Keep local stdio MCP servers on the same connection budget as the daemon.
+# OpenClaw/Codex launch this wrapper directly, so they do not pass through
+# bin/with-env. An explicit GBRAIN_ENV_FILE may point at another deployment's
+# env file; otherwise use the standard sibling file when it exists.
+env_file="${GBRAIN_ENV_FILE:-${HOME:-}/reza-brain/gbrain.env}"
+if [ -f "$env_file" ]; then
+  set -a
+  . "$env_file"
+  set +a
+fi
+
 resolve_bin() {
   if [ -n "${GBRAIN_BIN:-}" ]; then
     if [ ! -x "$GBRAIN_BIN" ]; then

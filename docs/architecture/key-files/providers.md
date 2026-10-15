@@ -64,3 +64,10 @@ Current behavior and load-bearing invariants; history belongs in Git and CHANGEL
 - `src/core/spend-posture.ts` — spend-control surface. `resolveSpendPosture(engine): 'gated'|'tokenmax'` (DB-plane `spend.posture`, fail-open `gated`); `tokenmax` makes every cost gate informational across sync/reindex/enrich/onboard (spend still ledgered — removes the ceiling, not the accounting). `parseUsdLimit(raw, def, {allowZero?})` accepts `off`/`unlimited`/`none` → `Infinity`; `formatUsdLimit(n)` renders `Infinity` as the string `'unlimited'` (never raw — `JSON.stringify(Infinity)` is `null`); `usdLimitToCap(n)` maps `Infinity` → `undefined` at the BudgetTracker boundary so ledger rows never serialize null. `normalizeSpendPosture`/`isValidSpendPosture` back the `config set` validation. Doc: `docs/operations/spend-controls.md`. Pinned by `test/sync-cost-preview.test.ts` + `test/spend-off-switch.test.ts`.
 
 - `src/core/transcription.ts` — Audio transcription: Groq Whisper (default), OpenAI fallback, ffmpeg segmentation for >25MB. Each provider request routes through `invokeAI` with kind `transcription`, so admission guards and invocation observers see it.
+
+
+### Fork compatibility on the v0.60.243.0 baseline
+
+- OpenRouter is the third key-aware tier provider after Anthropic and OpenAI, using equivalent Anthropic models. Native-key precedence and explicit model overrides remain unchanged. Init does not persist expansion pins for these runtime-resolved providers.
+- `provider-env.ts` is also the canonical map for CLI provider-key aliases: `config set/get/unset OPENROUTER_API_KEY` addresses the file-plane `openrouter_api_key`. Values stay redacted.
+- `providers explain` uses merged file/environment keys, model-specific embedding dimensions, and retains a healthy explicit embedding selection before considering alternatives. OpenRouter-only setup selects the recipe's Voyage default.

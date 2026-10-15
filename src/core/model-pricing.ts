@@ -263,6 +263,8 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   // catalogue's own rate ($0.0152 in / $1.28 out), which no longer matches
   // the vendor row above: a router row is read from the router, never
   // copied from the vendor.
+  // OpenRouter /api/v1/models catalog, verified 2026-10-15 (not the native rate).
+  'openrouter:deepseek/deepseek-v4.1-flash': { input: 0.02376, output: 0.72 },
   'openrouter:deepseek/deepseek-v4-flash-0731': { input: 0.0152, output: 1.28 },
   'openrouter:qwen/qwen3.7-flash':              { input: 0.03,  output: 0.13 },
   'openrouter:qwen/qwen3.6-plus':               { input: 0.325, output: 1.95 },

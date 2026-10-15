@@ -145,3 +145,18 @@ describe('formatEnvOutput (providers env <id>)', () => {
     expect(out).toContain('Get a key at example.com.');
   });
 });
+
+
+describe('fork embedding recommendation compatibility', () => {
+  test('preserves a healthy explicit pin and recognizes OpenRouter-only setup', async () => {
+    const { pickRecommended } = await import('../src/commands/providers.ts');
+    const option = (id: string, ready = true) => ({ id, touchpoint: 'embedding' as const,
+      model: id.split(':')[1]!, env_ready: ready, tier: 'openai-compat' as const, pros: [], cons: [] });
+    const opts = [option('voyage:voyage-4'), option('openrouter:voyageai/voyage-4')];
+    expect(pickRecommended(opts, { VOYAGE_API_KEY: true, OPENROUTER_API_KEY: true }, false,
+      'openrouter:voyageai/voyage-4-large').id).toBe('openrouter:voyageai/voyage-4-large');
+    expect(pickRecommended(opts, { OPENROUTER_API_KEY: true }, false).id).toBe('openrouter:voyageai/voyage-4');
+    expect(pickRecommended([option('voyage:voyage-4'), option('openrouter:voyageai/voyage-4', false)],
+      { VOYAGE_API_KEY: true }, false, 'openrouter:voyageai/voyage-4').id).toBe('voyage:voyage-4');
+  });
+});

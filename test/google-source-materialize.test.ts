@@ -32,9 +32,13 @@ import {
   myAddressSet,
   parseGoogleSourceConfig,
   readGoogleState,
-  runGoogleSync,
+  runGoogleSync as runGoogleSyncUnpaced,
 } from '../src/core/google/google-source.ts';
 import { importFile } from '../src/core/import-file.ts';
+
+// Fake API sweeps bypass production quota pacing; pacer behavior has its own tests.
+const runGoogleSync: typeof runGoogleSyncUnpaced = (...args) =>
+  withEnv({ GBRAIN_GMAIL_FETCH_GAP_MS: '0' }, () => runGoogleSyncUnpaced(...args));
 
 let engine: PGLiteEngine;
 let schemaVersion: string;

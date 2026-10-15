@@ -1,3 +1,4 @@
+import { getLoopsExtractionModel } from './loops-model.ts';
 /**
  * loop-catchup — recovery passes for the open-loop engine that the Gmail
  * sweep runs besides its normal per-thread detection.
@@ -241,7 +242,7 @@ export async function runLoopsCatchup(ctx: {
     return skip('excluded_label_unresolved', `loop exclusion labels ${exclusion.unresolved.map((t) => JSON.stringify(t)).join(', ')} did not resolve`);
   }
   const { isAvailable } = await import('../ai/gateway.ts');
-  if (!isAvailable('chat')) return skip('chat_unavailable', 'no configured chat model / API key');
+  if (!isAvailable('chat', await getLoopsExtractionModel(ctx.engine))) return skip('chat_unavailable', 'no configured chat model / API key');
   const spend = await loopsSpendGate(ctx.engine, now);
   if (!spend.ok) return skip(spend.reason, spend.message);
 

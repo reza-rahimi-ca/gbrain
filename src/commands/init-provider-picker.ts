@@ -1,3 +1,5 @@
+import { mergedProviderEnv } from '../core/ai/provider-env.ts';
+import { loadConfigFileOnly } from '../core/config.ts';
 /**
  * v0.37.x — interactive provider picker for `gbrain init`.
  *
@@ -111,7 +113,7 @@ function readyRecipesForTouchpoint(
  * null and prints the no-key fail-loud message itself.
  */
 export async function pickProvider(opts: PickProviderOpts): Promise<PickedProvider | null> {
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? mergedProviderEnv(loadConfigFileOnly(), process.env);
   const isTTY = opts.isTTY ?? process.stdin.isTTY ?? false;
   const writeStderr = opts.writeStderr ?? ((s: string) => process.stderr.write(s));
 

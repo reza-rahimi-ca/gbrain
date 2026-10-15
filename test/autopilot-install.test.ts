@@ -21,7 +21,7 @@ import { spawnSync } from 'child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-import { detectInstallTarget, writeWrapperScript, chatBootWarning } from '../src/commands/autopilot.ts';
+import { detectInstallTarget, systemdUserSessionAvailable, writeWrapperScript, chatBootWarning } from '../src/commands/autopilot.ts';
 import { gbrainPath } from '../src/core/config.ts';
 import { surfaceFileSource, surfaceSource } from './helpers/source-surface.ts';
 
@@ -84,6 +84,17 @@ test('wrapper and env template stay under the per-test GBRAIN_HOME', () => {
 });
 
 describe('detectInstallTarget', () => {
+  test('runtime session and lingering login select systemd without querying unit health', () => {
+    if (process.platform === 'darwin') return;
+    const fileExists = (p: string) => p === '/run/systemd/system';
+    expect(detectInstallTarget({ env: { XDG_RUNTIME_DIR: '/run/user/1234' }, fileExists,
+      exec: () => { throw new Error('must not probe degraded unit health'); } })).toBe('linux-systemd');
+    expect(detectInstallTarget({ env: { USER: 'alice-example' }, fileExists,
+      exec: (cmd) => { expect(cmd).toBe("loginctl show-user 'alice-example' -p Linger"); return 'Linger=yes\n'; } })).toBe('linux-systemd');
+    expect(detectInstallTarget({ env: {}, fileExists, exec: () => '' })).toBe('linux-cron');
+    expect(systemdUserSessionAvailable({ env: { USER: 'alice-example' }, exec: () => 'Linger=no' })).toBe(false);
+  });
+
   test('returns "macos" on darwin regardless of env', () => {
     if (process.platform !== 'darwin') return; // Skip on non-mac CI
     // Even if RENDER is set, darwin wins (user is probably dev-testing).

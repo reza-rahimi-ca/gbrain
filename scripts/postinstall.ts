@@ -15,11 +15,12 @@
 //   guaranteed runtime), and `shell: win32` re-opens a quoting surface. A
 //   checked-in .ts run by `bun run` sidesteps all three.
 //
-// Uses Bun APIs only — `which()` for Windows-aware PATH resolution (finds
-// gbrain.exe / gbrain.cmd) and an argv-array `Bun.spawnSync` (no shell, nothing
-// to quote). It NEVER fails the install: every path exits 0.
+// Resolves this package's own CLI and invokes it with Bun via an argv array.
+// No shell or PATH-dependent gbrain lookup. Never fails the install.
 
-import { which } from 'bun';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Repo modules load dynamically inside try/catch: a static import of a file
 // that is not on disk (a Docker dependency layer, a partial checkout) would
@@ -55,18 +56,22 @@ if (process.env.GBRAIN_UPGRADE_OWNS_MIGRATIONS === '1') {
   process.exit(0);
 }
 
-// Windows-aware PATH resolution — finds gbrain, gbrain.exe or gbrain.cmd.
-const bin = which('gbrain');
-
-if (!bin) {
-  // Fresh clone / global install where gbrain isn't on PATH yet: skip cleanly.
+// Use this installed package, not a different gbrain that happens to win PATH.
+const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+let cliRel = 'src/cli.ts';
+try {
+  const pkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf-8'));
+  if (typeof pkg.bin?.gbrain === 'string') cliRel = pkg.bin.gbrain;
+} catch { /* partial package: retain the conventional entrypoint */ }
+const cliPath = join(pkgRoot, cliRel);
+if (!existsSync(cliPath)) {
   console.error(HINT);
   process.exit(0);
 }
 
 try {
   const r = Bun.spawnSync({
-    cmd: [bin, 'apply-migrations', '--yes', '--non-interactive'],
+    cmd: [process.execPath, cliPath, 'apply-migrations', '--yes', '--non-interactive'],
     stdout: 'inherit',
     stderr: 'inherit',
   });

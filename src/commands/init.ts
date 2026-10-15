@@ -1,3 +1,4 @@
+import { mergedProviderEnv } from '../core/ai/provider-env.ts';
 import { execSync } from 'child_process';
 import { readdirSync, lstatSync, existsSync, copyFileSync, mkdirSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
@@ -527,7 +528,7 @@ interface ReadyProvider {
  */
 export async function groupReadyByProvider(
   touchpoint: 'embedding' | 'expansion' | 'chat',
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = mergedProviderEnv(loadConfigFileOnly(), process.env),
 ): Promise<ReadyProvider[]> {
   const { listRecipes } = await import('../core/ai/recipes/index.ts');
   const { envReady } = await import('./providers.ts');
@@ -800,6 +801,11 @@ async function resolveExpansionByEnv(out: ResolvedAIOptions): Promise<void> {
   if (ready.length === 1) {
     const r = ready[0].recipe;
     const tp = r.touchpoints.expansion!;
+    const { hasKeyAwareTierDefault, resolveTierDefault } = await import('../core/model-config.ts');
+    if (hasKeyAwareTierDefault(r.id)) {
+      console.error(`Detected ${r.auth_env?.required?.[0] ?? r.id}. Expansion uses ${resolveTierDefault('utility')} at runtime; no model pin written.`);
+      return;
+    }
     if (Array.isArray(tp.models) && tp.models.length > 0) {
       out.expansion_model = `${r.id}:${tp.models[0]}`;
       console.error(`Detected ${r.auth_env?.required?.[0] ?? r.id} env var. Using ${out.expansion_model} for expansion.`);

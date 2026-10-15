@@ -133,3 +133,10 @@ Current behavior and load-bearing invariants; history belongs in Git and CHANGEL
 - `src/schema.sql` — Full Postgres + pgvector DDL: canonical for every table except the TS fragment tables, whose `BEGIN/END GENERATED` regions are rewritten from the fragment modules; `bun run build:schema` derives schema-embedded.generated.ts and the PGLite template from it (`docs/ENGINES.md#canonical-schema-sources`)
 
 - `templates/` — SOUL.md, USER.md, ACCESS_POLICY.md, HEARTBEAT.md templates
+
+
+### Fork self-invocation compatibility
+
+- `src/commands/autopilot/install-target.ts` owns the injectable supervisor probe, re-exported by `autopilot.ts`. A runtime directory or a lingering user session selects systemd without rejecting a degraded but usable user manager.
+- Autopilot and durability wrappers prefer the running executable over PATH. Self-upgrade and skillify subprocesses use argv-based invocation of the resolved executable. The thin-client prompt uses the same self-path preference.
+- `scripts/postinstall.ts` resolves its own package's `bin.gbrain` and invokes it with the current Bun executable, never another installation on PATH. Upstream's runtime-version and upgrade-owns-migrations gates are preserved. Tests use a synthetic package and CLI, not a live brain.

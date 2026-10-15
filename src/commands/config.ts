@@ -1,3 +1,4 @@
+import { CONFIG_API_KEY_ENV, fileplaneKeyForProviderEnvName } from '../core/ai/provider-env.ts';
 import type { GBrainConfig } from '../core/config.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, loadConfigWithEngine } from '../core/config.ts';
@@ -257,18 +258,14 @@ async function restampVisibilityPosture(newRaw: string | null): Promise<void> {
   } catch { /* best-effort — the authoritative DB write already landed */ }
 }
 
-export const FILE_PLANE_API_KEYS: readonly string[] = [
-  'openai_api_key',
-  'anthropic_api_key',
-  'openrouter_api_key',
-  'voyage_api_key',
-  'dashscope_api_key',
-  'deepseek_api_key',
-  'litellm_api_key',
-  'together_api_key',
-  'google_api_key',
-  'azure_openai_api_key', // #4031: mergedProviderEnv reads the file plane only
-];
+export const FILE_PLANE_API_KEYS: readonly string[] = CONFIG_API_KEY_ENV.map(([key]) => key);
+
+/** Accept the credential name operators already use in their environment. */
+export function canonicalConfigKey(key: string, announce = false): string {
+  const canonical = fileplaneKeyForProviderEnvName(key) ?? key;
+  if (announce && key !== canonical) console.error(`[config] ${key} is the env-var spelling; stored as ${canonical} (the field the runtime reads).`);
+  return canonical;
+}
 
 export function redactConfigValue(key: string, value: string): string {
   // Both scheme spellings — the old local regex only matched postgresql://,
@@ -757,7 +754,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       return;
     }
 
-    const key = args[1];
+    const key = canonicalConfigKey(args[1], true);
     if (!key) {
       console.error('Usage: gbrain config unset <key> | --pattern <prefix>');
       process.exit(1);
@@ -878,7 +875,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   // strip it from the positional scan rather than reading args[1] blindly.
   const rawFlag = args.includes('--raw');
   const positionals = args.filter((a) => a !== '--raw');
-  const key = positionals[1];
+  const key = canonicalConfigKey(positionals[1], true);
   const value = positionals[2];
   if ((action === 'get' || action === 'set') && key) (await import('../core/questions/auto-think-migration.ts')).noteAutoThinkReplacement(key);
 

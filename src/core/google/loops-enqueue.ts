@@ -1,3 +1,4 @@
+import { getLoopsExtractionModel } from './loops-model.ts';
 /**
  * loops-enqueue — how a Gmail sweep hands threads to the open-loop engine:
  * the per-thread deterministic detection hook and the post-sweep
@@ -69,7 +70,7 @@ export async function enqueueLoopsExtraction(deps: GoogleSyncDeps): Promise<Loop
     // re-candidate on their next touch or on `sync --full` once a provider is
     // configured. One line per sweep names the reason — never silent.
     const { isAvailable } = await import('../ai/gateway.ts');
-    if (!isAvailable('chat')) {
+    if (!isAvailable('chat', await getLoopsExtractionModel(deps.engine))) {
       deps.log(
         `[google] loops_extract: chat provider unavailable (no configured chat model / API key) — ` +
           `skipped enqueue of ${deps.extractCandidates.length} eligible thread(s); they are queued on ` +

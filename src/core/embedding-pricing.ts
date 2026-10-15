@@ -101,6 +101,9 @@ export type PriceLookupResult =
  */
 const EMBEDDING_PROVIDER_ALIASES: Record<string, string> = {
   'azure-openai': 'openai',
+  // OpenRouter uses voyageai/<model>; its Voyage embedding routes use the
+  // native per-token rates, so keep one pricing row for each model.
+  voyageai: 'voyage',
 };
 
 /**

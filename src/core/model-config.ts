@@ -140,14 +140,28 @@ function discoveredOrStaticOpenAITier(tier: ModelTier): string {
   return typeof discovered === 'string' ? discovered : openaiStaticTierFallback()[tier];
 }
 
+/** OpenRouter equivalents of the native Anthropic defaults, without writing pins. */
+export const OPENROUTER_TIER_DEFAULTS: Record<ModelTier, string> = {
+  utility: 'openrouter:anthropic/claude-haiku-4.5',
+  reasoning: 'openrouter:anthropic/claude-sonnet-4.6',
+  deep: 'openrouter:anthropic/claude-opus-4.7',
+  subagent: 'openrouter:anthropic/claude-sonnet-4.6',
+};
+
 export const PROVIDER_TIER_DEFAULTS: ReadonlyArray<{
-  provider: 'anthropic' | 'openai';
+  provider: 'anthropic' | 'openai' | 'openrouter';
   envKey: string;
   tiers: (tier: ModelTier) => string;
 }> = [
   { provider: 'anthropic', envKey: 'ANTHROPIC_API_KEY', tiers: (tier) => TIER_DEFAULTS[tier] },
   { provider: 'openai', envKey: 'OPENAI_API_KEY', tiers: discoveredOrStaticOpenAITier },
+  { provider: 'openrouter', envKey: 'OPENROUTER_API_KEY', tiers: (tier) => OPENROUTER_TIER_DEFAULTS[tier] },
 ];
+
+/** Runtime key-aware providers do not need install-time chat/expansion pins. */
+export function hasKeyAwareTierDefault(providerId: string): boolean {
+  return PROVIDER_TIER_DEFAULTS.some(entry => entry.provider === providerId.trim().toLowerCase());
+}
 
 /** loadConfig, throw-safe (the hasAnthropicKey pattern): unreadable config = env-only. */
 function throwSafeLoadConfig(): GBrainConfig | null {
@@ -190,8 +204,8 @@ export function resolveTierDefault(
   for (const entry of PROVIDER_TIER_DEFAULTS) {
     if (merged[entry.envKey]) return entry.tiers(tier);
   }
-  // #3813: no anthropic/openai key. PROVIDER_TIER_DEFAULTS knows only those
-  // two, so a single-provider install (deepseek, openrouter, together, ...)
+  // #3813: no native or OpenRouter key. PROVIDER_TIER_DEFAULTS knows only these
+  // three, so a single-provider install (deepseek, together, ...)
   // used to land on the Anthropic floor and every bare-default caller
   // (extract_atoms, facts classify, page-summary, ...) called a provider with
   // no key. A servable pin for this tier beats the floor. Sits BELOW the key

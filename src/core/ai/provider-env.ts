@@ -54,6 +54,11 @@ export const CONFIG_API_KEY_ENV = [
   ['azure_openai_api_key', 'AZURE_OPENAI_API_KEY'],
 ] as const satisfies ReadonlyArray<readonly [keyof GBrainConfig, string]>;
 
+/** Map an exact credential env name to the field the gateway reads. */
+export function fileplaneKeyForProviderEnvName(envName: string): string | null {
+  return CONFIG_API_KEY_ENV.find(([, name]) => name === envName)?.[0] ?? null;
+}
+
 const realEnv = (env: Record<string, string | undefined>, name: string): string | undefined =>
   env[name] === undefined || env[name] === '' ? undefined : env[name];
 

@@ -10,6 +10,8 @@ import { configureGateway, embedOne, isAvailable as gwIsAvailable, chat as gwCha
 import { buildGatewayConfig } from '../core/ai/build-gateway-config.ts';
 import { probeOllama, probeLMStudio } from '../core/ai/probes.ts';
 import { loadConfig } from '../core/config.ts';
+import { mergedProviderEnv } from '../core/ai/provider-env.ts';
+import { embeddingDimsForModel } from '../core/ai/model-resolver.ts';
 import { AIConfigError, AITransientError } from '../core/ai/errors.ts';
 import { lookupEmbeddingPrice } from '../core/embedding-pricing.ts';
 import type { Recipe } from '../core/ai/types.ts';
@@ -315,14 +317,17 @@ async function runExplain(args: string[]): Promise<void> {
   const asJson = args.includes('--json') || args.includes('-j');
 
   const recipes = listRecipes();
+  const cfg = loadConfig();
+  const env = mergedProviderEnv(cfg, process.env);
   const env_detected = {
-    OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
-    GOOGLE_GENERATIVE_AI_API_KEY: !!process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-    ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
-    VOYAGE_API_KEY: !!process.env.VOYAGE_API_KEY,
-    DEEPSEEK_API_KEY: !!process.env.DEEPSEEK_API_KEY,
-    GROQ_API_KEY: !!process.env.GROQ_API_KEY,
-    TOGETHER_API_KEY: !!process.env.TOGETHER_API_KEY,
+    OPENROUTER_API_KEY: !!env.OPENROUTER_API_KEY,
+    OPENAI_API_KEY: !!env.OPENAI_API_KEY,
+    GOOGLE_GENERATIVE_AI_API_KEY: !!env.GOOGLE_GENERATIVE_AI_API_KEY,
+    ANTHROPIC_API_KEY: !!env.ANTHROPIC_API_KEY,
+    VOYAGE_API_KEY: !!env.VOYAGE_API_KEY,
+    DEEPSEEK_API_KEY: !!env.DEEPSEEK_API_KEY,
+    GROQ_API_KEY: !!env.GROQ_API_KEY,
+    TOGETHER_API_KEY: !!env.TOGETHER_API_KEY,
   };
 
   // Parallel probes for local providers (1s timeout each)
@@ -343,11 +348,11 @@ async function runExplain(args: string[]): Promise<void> {
         id: `${r.id}:${canonicalModel}`,
         touchpoint: 'embedding',
         model: canonicalModel,
-        dims: m.default_dims,
+        dims: embeddingDimsForModel(r, canonicalModel),
         cost_per_1m_tokens_usd:
           modelPrice.kind === 'known' ? modelPrice.pricePerMTok : m.cost_per_1m_tokens_usd,
         price_last_verified: m.price_last_verified,
-        env_ready: envReady(r) || (r.id === 'ollama' && ollama.models_endpoint_valid === true),
+        env_ready: envReady(r, env) || (r.id === 'ollama' && ollama.models_endpoint_valid === true),
         tier: r.tier,
         pros: prosFor(r, 'embedding'),
         cons: consFor(r),
@@ -361,7 +366,7 @@ async function runExplain(args: string[]): Promise<void> {
         model: m.models[0],
         cost_per_1m_tokens_usd: m.cost_per_1m_tokens_usd,
         price_last_verified: m.price_last_verified,
-        env_ready: envReady(r),
+        env_ready: envReady(r, env),
         tier: r.tier,
         pros: prosFor(r, 'expansion'),
         cons: consFor(r),
@@ -376,7 +381,7 @@ async function runExplain(args: string[]): Promise<void> {
         cost_per_1m_input_usd: m.cost_per_1m_input_usd,
         cost_per_1m_output_usd: m.cost_per_1m_output_usd,
         price_last_verified: m.price_last_verified,
-        env_ready: envReady(r),
+        env_ready: envReady(r, env),
         tier: r.tier,
         pros: prosFor(r, 'chat'),
         cons: consFor(r),
@@ -384,7 +389,7 @@ async function runExplain(args: string[]): Promise<void> {
     }
   }
 
-  const recommended = pickRecommended(options, env_detected, ollama.models_endpoint_valid === true);
+  const recommended = pickRecommended(options, env_detected, ollama.models_endpoint_valid === true, cfg?.embedding_model);
 
   const matrix = {
     schema_version: SCHEMA_VERSION,
@@ -467,11 +472,17 @@ function consFor(r: Recipe): string[] {
   return out;
 }
 
-function pickRecommended(options: ProviderOption[], env: Record<string, boolean>, ollamaReady: boolean): { id: string; reason: string } {
+export function pickRecommended(options: ProviderOption[], env: Record<string, boolean>, ollamaReady: boolean, configuredEmbeddingModel?: string | null): { id: string; reason: string } {
   // Embedding recommendation: prefer env-ready providers in canonical order —
   // Voyage first (the v0.46.3 new-install default: one key covers embedding +
 
   const embOpts = options.filter(o => o.touchpoint === 'embedding');
+  if (configuredEmbeddingModel) {
+    const provider = configuredEmbeddingModel.split(':')[0];
+    if (embOpts.some(o => o.id.startsWith(`${provider}:`) && o.env_ready)) {
+      return { id: configuredEmbeddingModel, reason: `Already configured and healthy (embedding_model: ${configuredEmbeddingModel}); no change needed.` };
+    }
+  }
   if (env.VOYAGE_API_KEY) {
     const voyage = embOpts.find(o => o.id.startsWith('voyage:'));
     if (voyage) return { id: voyage.id, reason: 'VOYAGE_API_KEY set — the default: voyage-4 at 1024 dims; the same key powers the rerank-3-lite reranker and the multimodal model.' };
@@ -487,6 +498,10 @@ function pickRecommended(options: ProviderOption[], env: Record<string, boolean>
   if (env.GOOGLE_GENERATIVE_AI_API_KEY) {
     const google = embOpts.find(o => o.id.startsWith('google:'));
     if (google) return { id: google.id, reason: 'GOOGLE_GENERATIVE_AI_API_KEY set — Gemini embedding at 768 dims.' };
+  }
+  if (env.OPENROUTER_API_KEY) {
+    const routed = embOpts.find(o => o.id.startsWith('openrouter:'));
+    if (routed) return { id: routed.id, reason: 'OPENROUTER_API_KEY set; one key supports embeddings, chat, and reranking.' };
   }
   // Nothing ready. Recommend the canonical default as the setup path.
   return {

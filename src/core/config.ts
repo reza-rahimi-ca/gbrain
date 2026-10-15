@@ -1475,6 +1475,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // google-source email pages (default ON for google sources; deterministic
   // thread detection is unaffected). `gbrain config set loops.extraction_enabled false`.
   'loops.extraction_enabled',
+  'loops.extraction_model', // Optional judge override; unset uses the configured chat model.
   // #5445: brain-wide Gmail labels (names or ids, comma/JSON list) whose threads
   // never enter paid loop extraction; a source's g_loops_exclude_labels wins.
   'loops.extraction_exclude_labels',
