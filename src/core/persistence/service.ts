@@ -1,3 +1,4 @@
+import { mirrorUnmanagedWrite } from './unmanaged-mirror.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { OperationError } from '../ops/contract.ts';
@@ -302,7 +303,7 @@ async function readProgress(engine: BrainEngine, id: string, remaining: number):
 }
 /** Compatibility form of `awaitWrite`: the latest row, terminal or still pending. */
 export async function waitForWrite(engine: BrainEngine, row: WriteRequest, config: GBrainConfig, waitMs = 5000): Promise<WriteRequest> {
-  return (await awaitWrite(engine, row, config, { waitMs })).row;
+  return mirrorUnmanagedWrite(engine, (await awaitWrite(engine, row, config, { waitMs })).row);
 }
 /**
  * #6007: wait for several admitted writes against one deadline. Every row waits at once, so each one's consumer handoff is registered

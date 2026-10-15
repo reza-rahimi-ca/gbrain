@@ -1,6 +1,6 @@
 import { getRecipe } from './recipes/index.ts';
 import { parseModelId } from './model-resolver.ts';
-import { DEFAULT_RERANKER_MODEL } from './defaults.ts';
+import { DEFAULT_RERANKER_MODEL, OPENROUTER_DEFAULT_RERANKER_MODEL } from './defaults.ts';
 
 export interface RerankerReadiness {
   /** The provider:model string that was evaluated. */
@@ -94,4 +94,23 @@ export function describeRerankerFix(r: RerankerReadiness): string | null {
     );
   }
   return `reranker ${r.model} is not ready`;
+}
+
+export interface DefaultRerankerResolution {
+  model: string;
+  readiness: RerankerReadiness;
+  keyAware: boolean;
+}
+
+/** Native key wins; OpenRouter-only selects the alternate; keyless keeps native fail-open behavior.
+ * Explicit model overrides are resolved by the caller before this default. No environment reads here. */
+export function resolveDefaultRerankerModel(
+  env: Record<string, string | undefined>, opts: RerankerReadinessOpts = {},
+): DefaultRerankerResolution {
+  const primary = rerankerReadiness(DEFAULT_RERANKER_MODEL, env, opts);
+  if (!primary.ready) {
+    const alternate = rerankerReadiness(OPENROUTER_DEFAULT_RERANKER_MODEL, env, opts);
+    if (alternate.ready) return { model: alternate.model, readiness: alternate, keyAware: true };
+  }
+  return { model: primary.model, readiness: primary, keyAware: false };
 }

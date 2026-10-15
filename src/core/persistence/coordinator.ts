@@ -1,3 +1,4 @@
+import { assertUnmanagedPublication, mirrorUnmanagedWrite } from './unmanaged-mirror.ts';
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
@@ -379,6 +380,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         await authorizePageVisibility(tx, row.authority, row.slug);
         if ((snapshot?.page.id ?? null) !== row.page_id) throw pageIdentityError(snapshot != null || row.page_id === null, 'The accepted page was deleted or recreated.');
         await assertUnboundPublication(tx, row, snapshot?.page.source_path);
+        await assertUnmanagedPublication(tx, row);
         if ((snapshot?.revision ?? null) !== prepared.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.', 'Read its current revision and submit the updated intent with a new request_id.');
       }
       await prepared.validate?.(tx);
@@ -425,7 +427,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     });
     await hooks.boundary?.('after_commit', done);
     if (recovery) await clearResolvedRecovery(engine, row.id, done);
-    return done;
+    return mirrorUnmanagedWrite(engine, done);
   } catch (error) {
     if (recovery) {
       // Even a rejected prepare can retain a journal record; do not leave that

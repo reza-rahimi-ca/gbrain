@@ -40,6 +40,7 @@ import { cachedPreadmitBrain, dropPreadmitCache, preadmitReads, preadmitRecheckF
 import { pipelined } from '../page-state/transactions.ts';
 import { isMirrorOnlyPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
+import { UNMANAGED_NO_OWNER, unownedWriteFallsBackToLegacy } from './unmanaged-mirror.ts';
 
 export async function requestPrincipalForContext(ctx: OperationContext): Promise<Principal> {
   // #5994: a failed-writes replay is admitted under the original writer.
@@ -374,6 +375,7 @@ export async function preparePageAdmission(ctx: OperationContext,
   // A connector source without a canonical owner is database-only by design
   // (connector_database): a page write never claims it or refuses as unbound.
   if (writeThrough && root && !binding && isConnectorSourceKind(source.kind)) authority.databaseOnlyReason = 'connector_database';
+  else if (writeThrough && root && !binding && await unownedWriteFallsBackToLegacy(ctx.engine)) authority.databaseOnlyReason = UNMANAGED_NO_OWNER;
   else if (writeThrough && root && !binding) {
     // #6449: a source activation listed database-only (sync.write_through was off) is never claimed by a flip of that
     // setting: the write refuses with the claim named (or stays database-only under persistence.unbound_write), as on Postgres.

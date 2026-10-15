@@ -18,7 +18,7 @@ import { loadConfig, loadConfigWithEngine, type GBrainConfig } from '../config.t
 import type { DbPlaneEngineReader } from '../config-db-merge.ts';
 import { mergedProviderEnv } from './provider-env.ts';
 import { requireConfig } from './gateway.ts';
-import { rerankerReadiness, type RerankerReadiness } from './reranker-readiness.ts';
+import { rerankerReadiness, resolveDefaultRerankerModel, type RerankerReadiness } from './reranker-readiness.ts';
 
 export interface EngineReadiness {
   readiness: RerankerReadiness;
@@ -26,15 +26,11 @@ export interface EngineReadiness {
   plane: 'gateway' | 'config';
 }
 
-export async function rerankerReadinessForEngine(
-  engine: DbPlaneEngineReader,
-  model: string,
-): Promise<EngineReadiness> {
+async function envPlaneForEngine(engine: DbPlaneEngineReader) {
   try {
     const gw = requireConfig();
     return {
-      plane: 'gateway',
-      readiness: rerankerReadiness(model, gw.env ?? {}, { baseUrlOverrides: gw.base_urls ?? null }),
+      plane: 'gateway' as const, env: gw.env ?? {}, baseUrlOverrides: gw.base_urls ?? null,
     };
   } catch {
     // Gateway not configured — build the plane the CLI would.
@@ -44,9 +40,17 @@ export async function rerankerReadinessForEngine(
   let mergedCfg: GBrainConfig | null = fileCfg;
   try { mergedCfg = await loadConfigWithEngine(engine, fileCfg); } catch { mergedCfg = fileCfg; }
   return {
-    plane: 'config',
-    readiness: rerankerReadiness(model, mergedProviderEnv(mergedCfg, process.env), {
-      baseUrlOverrides: mergedCfg?.provider_base_urls ?? null,
-    }),
+    plane: 'config' as const, env: mergedProviderEnv(mergedCfg, process.env),
+    baseUrlOverrides: mergedCfg?.provider_base_urls ?? null,
   };
+}
+
+export async function rerankerReadinessForEngine(engine: DbPlaneEngineReader, model: string): Promise<EngineReadiness> {
+  const p = await envPlaneForEngine(engine);
+  return { plane: p.plane, readiness: rerankerReadiness(model, p.env, { baseUrlOverrides: p.baseUrlOverrides }) };
+}
+
+export async function resolveDefaultRerankerModelForEngine(engine: DbPlaneEngineReader) {
+  const p = await envPlaneForEngine(engine);
+  return { plane: p.plane, ...resolveDefaultRerankerModel(p.env, { baseUrlOverrides: p.baseUrlOverrides }) };
 }

@@ -17,6 +17,7 @@ import { authorizeStoredRequest, submissionAuthority } from './authority.ts';
 import { admitWrite, admitWriteInTransaction, assertPageRequestIdentity, assertReplayIntent, completeWrite, getWriteRequest, intentDigest } from './journal.ts';
 import { assertPersistenceAccepting, registerMutationPreparer, waitForWrite, writeResponse } from './service.ts';
 import { claimWorktree } from './ownership.ts';
+import { UNMANAGED_NO_OWNER, unownedWriteFallsBackToLegacy } from './unmanaged-mirror.ts';
 import { declareDurablePersistence } from './protocol.ts';
 import { resolveFactWriteTarget } from './fact-write-target.ts';
 import { WRITER_INSPECTION_HINT } from './admin-intent.ts';
@@ -103,8 +104,9 @@ async function planRememberTarget(ctx: OperationContext, sourceId: string, sourc
   if (target?.kind === 'unbound') {
     // An inferred link never designates an owner or reports a missing one.
     if (inferred) throw new InferredTargetRejected('ENTITY_LINK_FAILED');
-    if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.', WRITER_INSPECTION_HINT);
-    binding = await claimWorktree(ctx.engine, sourceId, target.root, undefined, undefined, { automatic: true });
+    if (await unownedWriteFallsBackToLegacy(ctx.engine)) authority.databaseOnlyReason = UNMANAGED_NO_OWNER;
+    else if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.', WRITER_INSPECTION_HINT);
+    else binding = await claimWorktree(ctx.engine, sourceId, target.root, undefined, undefined, { automatic: true });
   }
   // An inferred link is optional: a canonical file it could not publish (missing,
   // or carrying an uncoordinated edit) falls back to the unattributed save

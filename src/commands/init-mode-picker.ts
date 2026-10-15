@@ -17,7 +17,7 @@
  * refuses unless `--force`. Picker choices record `search.mode_source: auto`.
  *
  * The recommendation reads the configured model tiers, whether a chat key
- * exists (Anthropic / OpenAI / Google) and whether the reranker the
+ * exists (Anthropic / OpenAI / Google / OpenRouter) and whether the reranker the
  * recommended mode would use is ready (rerankerReadiness, not a key name),
  * both through mergedProviderEnv so a key saved in ~/.gbrain/config.json
  * counts. Its copy (reasons, banner, matrix) lives in
@@ -45,7 +45,7 @@ import {
 } from '../core/search/mode-advice.ts';
 import { loadConfig, loadConfigWithEngine, type GBrainConfig } from '../core/config.ts';
 import { mergedProviderEnv } from '../core/ai/provider-env.ts';
-import { rerankerReadiness } from '../core/ai/reranker-readiness.ts';
+import { rerankerReadiness, resolveDefaultRerankerModel } from '../core/ai/reranker-readiness.ts';
 
 /**
  * The inputs that shape the recommendation. Undefined means unknown; the
@@ -56,7 +56,7 @@ export interface ModePickerInputs {
   subagentModel?: string | null;
   /** Configured default model id. */
   defaultModel?: string | null;
-  /** A chat key (Anthropic / OpenAI / Google) is configured, in the environment or the config file. */
+  /** A chat key (Anthropic / OpenAI / Google / OpenRouter) is configured, in the environment or the config file. */
   hasChatKey?: boolean;
   /** The reranker the recommended mode would use is ready (readiness, not a key name). */
   hasRerankKey?: boolean;
@@ -81,7 +81,7 @@ export function recommendModeFor(inputs: ModePickerInputs): { mode: SearchMode; 
 }
 
 /** Chat keys the recommendation counts, after mergedProviderEnv folds config-file keys and the GEMINI alias. */
-const CHAT_KEY_ENV = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'] as const;
+const CHAT_KEY_ENV = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'OPENROUTER_API_KEY'] as const;
 
 /**
  * Resolve inputs from the engine, the config file and the environment.
@@ -113,7 +113,8 @@ export async function resolveModePickerInputs(engine: BrainEngine): Promise<Mode
   let hasRerankKey: boolean | undefined;
   try {
     const overrides = (await loadSearchModeConfig(engine)).overrides;
-    const model = resolveSearchMode({ mode: RECOMMENDED_SEARCH_MODE, overrides }).reranker_model;
+    const defaultRerankerModel = env ? resolveDefaultRerankerModel(env, { baseUrlOverrides: cfg?.provider_base_urls ?? null }).model : undefined;
+    const model = resolveSearchMode({ mode: RECOMMENDED_SEARCH_MODE, overrides, defaultRerankerModel }).reranker_model;
     hasRerankKey = env ? rerankerReadiness(model, env, { baseUrlOverrides: cfg?.provider_base_urls ?? null }).ready : undefined;
   } catch { hasRerankKey = undefined; }
 

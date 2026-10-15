@@ -18,6 +18,8 @@ export const NEW_INSTALL_DEFAULT_EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL;
 export const NEW_INSTALL_DEFAULT_EMBEDDING_DIMENSIONS = DEFAULT_EMBEDDING_DIMENSIONS;
 export const DEFAULT_RERANKER_MODEL = 'voyage:rerank-3-lite';
 export const NEW_INSTALL_DEFAULT_RERANKER_MODEL = DEFAULT_RERANKER_MODEL;
+/** Alternate bundle route when only the OpenRouter key is available; never an explicit pin. */
+export const OPENROUTER_DEFAULT_RERANKER_MODEL = 'openrouter:voyageai/rerank-3-lite';
 
 export function renderCanonicalMigrationCommands(opts: { colDims?: number | null } = {}): {
   /** Live run (agents append --yes themselves after consent). */

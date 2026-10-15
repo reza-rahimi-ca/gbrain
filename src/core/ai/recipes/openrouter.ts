@@ -211,7 +211,7 @@ export const openrouterCompatFetch = (async (
  * specific model, check https://openrouter.ai/models.
  *
  * Reranker: `/api/v1/rerank` proxies cross-encoder rerankers (Cohere v3.5/4-fast/4-pro
- * NVIDIA Nemotron VL, and Voyage 2.5). Wire shape matches `gateway.rerank()`:
+ * NVIDIA Nemotron VL, and Voyage 2.5 / 3-lite). Wire shape matches `gateway.rerank()`:
  * `{ query, documents, model }` → `{ results: [{ index, relevance_score }] }`.
  * Unlike embedding/chat, the reranker path strictly enforces the `models`
  * allowlist (no openai-compat bypass) — adding new rerank models requires a
@@ -348,6 +348,7 @@ export const openrouter: Recipe = {
     },
     reranker: {
       models: [
+        'voyageai/rerank-3-lite',
         'voyageai/rerank-2.5',
         'voyageai/rerank-2.5-lite',
         'cohere/rerank-v3.5',

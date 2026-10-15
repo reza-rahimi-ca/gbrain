@@ -824,6 +824,8 @@ export interface ResolveSearchModeInput {
   overrides?: SearchKeyOverrides;
   /** Per-call opts (SearchOpts / HybridSearchOpts). */
   perCall?: SearchPerCallOpts;
+  /** Key-aware bundle default, below explicit config/per-call overrides. Resolved by the loader. */
+  defaultRerankerModel?: string;
   /** Raw `search.source_boosts` (read in the same snapshot; see source-boost.ts). */
   sourceBoosts?: string;
   /** Raw `search.alias_token_hop` (read in the same snapshot; #5428, opt-in). */
@@ -854,7 +856,7 @@ export function resolveSearchMode(input: ResolveSearchModeInput): ResolvedSearch
     return bundle[key];
   };
 
-  const resolvedRerankerModel = pick('reranker_model');
+  const resolvedRerankerModel = pc.reranker_model ?? ov.reranker_model ?? input.defaultRerankerModel ?? bundle.reranker_model;
   const pickRerankerTimeoutMs = (): number => {
     if (pc.reranker_timeout_ms !== undefined) return pc.reranker_timeout_ms;
     if (ov.reranker_timeout_ms !== undefined) return ov.reranker_timeout_ms;
@@ -944,6 +946,11 @@ export function attributeKnob<K extends keyof ModeBundle>(
   }
   if (ov[knob] !== undefined) {
     return { knob, value: resolved[knob], source: 'override', source_detail: `config: ${KNOB_CONFIG_KEY[knob]}` };
+  }
+  if (knob === 'reranker_model' && input.defaultRerankerModel !== undefined
+    && input.defaultRerankerModel !== MODE_BUNDLES[resolved.resolved_mode].reranker_model) {
+    return { knob, value: resolved[knob], source: 'mode', source_detail:
+      `mode: ${resolved.resolved_mode}; key-aware default (${MODE_BUNDLES[resolved.resolved_mode].reranker_model} unavailable on this provider plane)` };
   }
   if (resolved.mode_valid) {
     return { knob, value: resolved[knob], source: 'mode', source_detail: `mode: ${resolved.resolved_mode}` };
@@ -1649,10 +1656,18 @@ export async function loadSearchModeConfig(
     if (overrideValues[i] !== undefined) configMap[key] = overrideValues[i];
   });
 
+  // Lazy to keep the pure mode resolver import-light. A readiness failure must not break search.
+  let defaultRerankerModel: string | undefined;
+  try {
+    const { resolveDefaultRerankerModelForEngine } = await import('../ai/reranker-readiness-engine.ts');
+    const resolved = await resolveDefaultRerankerModelForEngine(engine);
+    if (resolved.keyAware) defaultRerankerModel = resolved.model;
+  } catch { /* static bundle remains the fail-open floor */ }
   const decide = pickDecideConfig(snapshot);
   return {
     mode,
     overrides: loadOverridesFromConfig(configMap),
+    ...(defaultRerankerModel !== undefined ? { defaultRerankerModel } : {}),
     ...(sourceBoosts !== undefined ? { sourceBoosts } : {}),
     ...(aliasTokenHop !== undefined ? { aliasTokenHop } : {}),
     ...(decide ? { decide } : {}),

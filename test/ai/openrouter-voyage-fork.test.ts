@@ -38,7 +38,7 @@ describe('OpenRouter Voyage fork compatibility', () => {
     }
   });
 
-  test.each(['rerank-2.5', 'rerank-2.5-lite'])('%s uses the OpenRouter request and response contract', async (model) => {
+  test.each(['rerank-2.5', 'rerank-2.5-lite', 'rerank-3-lite'])('%s uses the OpenRouter request and response contract', async (model) => {
     configureGateway({ reranker_model: `openrouter:voyageai/${model}`, env: { OPENROUTER_API_KEY: 'test-key' } });
     let calls = 0;
     __setRerankTransportForTests(async (url, init) => {

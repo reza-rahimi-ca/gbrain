@@ -120,6 +120,7 @@ export async function resolveHybridRequest(
     // escalation). Unknown values fall back to the default in resolveSearchMode.
     mode: opts?.mode ?? modeInput.mode,
     overrides: modeInput.overrides,
+    defaultRerankerModel: modeInput.defaultRerankerModel,
     perCall: {
       intentWeighting: opts?.intentWeighting,
       tokenBudget: opts?.tokenBudget,

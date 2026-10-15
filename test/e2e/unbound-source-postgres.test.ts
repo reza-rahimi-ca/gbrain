@@ -1,7 +1,7 @@
 /**
  * #5254: a Postgres put_page to a filesystem source with no canonical owner.
  *
- * Contract: refused by default with detail `unbound_source` and a hint naming
+ * Contract: explicit refusal policy returns detail `unbound_source` and a hint naming
  * both exits (bind through `sources writer claim`, or opt in with
  * `persistence.unbound_write=database_only`). The opt-in writes new or already
  * database-only pages to the database only, classifies them durably, rechecks
@@ -74,6 +74,8 @@ function test(name: string, run: () => Promise<void>) {
     try {
       await withEnv({ GBRAIN_HOME: join(fixtureDir, 'home') }, async () => {
         await engine.setConfig('sync.repo_path', root);
+        // Fork default is classic write-through; this suite pins the explicit upstream policy.
+        await engine.setConfig('persistence.unbound_write', 'refuse');
         registration = await registerLocalWriter(engine, 'stdio', {
           sourceIds: ['default'], operations: null, scopes: ['read', 'write'], slugPrefixes: ['notes'],
         });
@@ -125,7 +127,7 @@ async function setUnboundWrite(value: string): Promise<{ exitCode: number | null
 }
 
 d('#5254 Postgres put_page to an unbound filesystem source', () => {
-  test('default refuses with detail unbound_source and names the bind command and the opt-in key', async () => {
+  test('explicit refuse policy returns detail unbound_source and names the bind command and the opt-in key', async () => {
     const refused = await put('First note.');
     expect(refused.response.isError).toBe(true);
     expect(refused.payload.error).toBe('owner_unavailable');
@@ -362,10 +364,10 @@ d('#5254 Postgres put_page to an unbound filesystem source', () => {
     expect((await engine.getPage(slug, { sourceId: 'default' }))?.compiled_truth).toContain('Database-only original.');
   });
 
-  test('#5393 with persistence.unbound_write unset, capture, add_tag and delete_page refuse as before', async () => {
+  test('#5393 with persistence.unbound_write=refuse, capture, add_tag and delete_page refuse', async () => {
     await engine.setConfig('persistence.unbound_write', 'database_only');
     expect((await put('Database-only note.')).payload.state).toBe('committed');
-    await engine.executeRaw("DELETE FROM config WHERE key='persistence.unbound_write'");
+    await engine.setConfig('persistence.unbound_write', 'refuse');
     const captured = await dispatch('capture', { slug: 'notes/captured', content: 'Captured.', request_id: randomUUID() });
     expect(captured.payload.detail).toBe('unbound_source');
     for (const [name, params] of [['add_tag', { tag: 'example' }], ['delete_page', {}]] as const) {

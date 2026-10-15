@@ -1,3 +1,4 @@
+import { assertUnmanagedPublication, mirrorUnmanagedWrite } from './unmanaged-mirror.ts';
 /**
  * Grouped publication: one transaction publishes a claimed run of consecutive
  * requests of one worktree that share a group key (journal.ts
@@ -327,6 +328,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
               await authorizePageVisibility(tx, row.authority, row.slug);
               if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page was deleted or recreated.', 'Read the page again and submit a new intent with a new request_id.');
               await assertUnboundPublication(tx, row, snapshot?.page.source_path);
+              await assertUnmanagedPublication(tx, row);
               if ((snapshot?.revision ?? null) !== member.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.', 'Read its current revision and submit the updated intent with a new request_id.');
               return snapshot;
             },
@@ -367,6 +369,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
     });
     committed = true;
     for (const row of done) await seam('after_commit', row);
+    for (let i = 0; i < done.length; i++) done[i] = await mirrorUnmanagedWrite(engine, done[i]!);
     hooks.committed?.(done);
     if (recorded.size) {
       try { await clearResolvedRecoveries(engine, done, transaction); }

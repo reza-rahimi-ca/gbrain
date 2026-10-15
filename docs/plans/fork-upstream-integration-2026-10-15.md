@@ -13,7 +13,7 @@
 | Area | Included behavior | Fork provenance |
 | --- | --- | --- |
 | OpenRouter embeddings | Voyage 4 family IDs, 1024 default width and pricing; canonical Voyage selection; per-model widths retained for other routes | `ce15f2406`, `22e78a091`, `c32c19dd6` |
-| OpenRouter rerank transport | Explicit Voyage 2.5 / 2.5-lite routes accepted and tested; default selection remains pending | `ce15f2406` |
+| OpenRouter rerank transport | Explicit Voyage 2.5 / 2.5-lite routes retained; unconfigured OpenRouter-only installs use 3-lite | `ce15f2406` |
 | Model defaults | OpenRouter-only Anthropic chat tiers after native Anthropic/OpenAI precedence; runtime expansion defaults without writing pins | `d94a8a730`, `1e0b8b32b` |
 | Configuration | Provider environment-name aliases map to the existing file-plane key table; init and provider diagnostics fold file keys consistently | `fcb3213d4`, `43ac1a2d0`, `caf444dfb` |
 | Provider advice | Keep a healthy explicit embedding provider/model; recognize an OpenRouter-only setup; report model-specific dimensions | `f7710ebcb` |
@@ -34,14 +34,16 @@ The embedding recipe uses the canonical Voyage model's supported dimension choic
 - The old PATH-diagnostic wording extension is not necessary for correct self-invocation and is not carried.
 - Google's upstream eligibility rules, recent-thread sampling, managed-write preflight, daily spend authorization, and bounded 2048/8192 output retry are retained. The old unlimited output change is not replayed.
 
-## Decisions requested, unresolved
+## Confirmed decisions, 2026-10-15
 
-1. **OpenRouter-only reranker default:** preserve fork `rerank-2.5`, or adopt upstream's `rerank-3-lite` model family through OpenRouter? Existing explicit overrides must remain untouched. Key-aware search-mode, init and doctor integration awaits this choice (`ffd7a6fea`, `60f34473e`).
-2. **Connector activation guard:** keep the fork's hard refusal when connector sources exist, or rely on upstream's newer connector-aware managed persistence? No live activation is authorized (`4024e838e`).
-3. **Fork-pinned updater:** current deployment has self-upgrade off and no source pin. Defer the large custom updater, or port its full source-pinning and attestation behavior onto the new upstream upgrade machinery (`efe663533`)?
-4. **Unmanaged Postgres write-through:** the old compatibility path is NOT in this branch yet (`cf1f1d9d0`). Upstream still refuses writes to unowned file-backed sources. Include an adapted compatibility port before deployment, or leave this branch staged? This is a deployment blocker for unchanged unmanaged write behavior, not proof that upstream's new persistence is interchangeable.
+1. **OpenRouter-only reranker default:** use `openrouter:voyageai/rerank-3-lite` for new/unconfigured installs. Native Voyage precedence and explicit model/enabled overrides remain unchanged. Key-aware search-mode, init and doctor wiring is included.
+2. **Connector activation guard:** omit the old fork-only hard refusal (`4024e838e`); retain upstream's connector-aware implementation. No live managed-mode activation is authorized or performed.
+3. **Fork-pinned updater:** deferred by the operator. Auto-upgrade remains off; no live updater configuration is changed.
+4. **Unmanaged Postgres write-through:** include the adapted compatibility path. Journaled database writes are followed by best-effort classic mirroring for unowned filesystem sources, without claiming owners or activating managed mode. Explicit unbound policies and upstream safety boundaries remain in force.
 
-## Validation
+These decisions authorize source integration only, not pushing, installation, service restart, migration, remediation or live brain changes.
+
+## First integration batch validation
 
 All commands run with an isolated HOME/GBRAIN_HOME and no live DB or provider keys. Google uses a fake API and in-memory PGLite. Provider calls use injected transports. Serial tests run in their own process.
 
@@ -56,3 +58,15 @@ All commands run with an isolated HOME/GBRAIN_HOME and no live DB or provider ke
 - Full unit matrix, PostgreSQL E2E and real-provider smoke tests have not been run. No deployment readiness is claimed.
 
 Public pricing evidence: [OpenRouter V4.1 Flash](https://openrouter.ai/deepseek/deepseek-v4.1-flash) and its unauthenticated `/api/v1/models` catalog, checked 2026-10-15.
+
+Reranker route evidence: [OpenRouter rerank-3-lite](https://openrouter.ai/voyageai/rerank-3-lite/), checked 2026-10-15. Validation uses injected transport, not a paid provider call.
+
+## Confirmed-choice integration validation
+
+- 336 distinct focused tests passed across 21 files, counted once per file/test. These cover mode/config/init/readiness, actual bare and cached hybrid routing through an injected rerank transport, persistence authority, memory and semantic mutations.
+- Native Postgres: 13 unmanaged compatibility cases and 13 existing unbound-policy cases passed on a disposable pgvector container. Coverage includes update/replay, custom-path delete/restore, fenced remember, background zero-wait publication, disabled writes, explicit unbound policies, connector directories, read-only mirrors, revision conflicts, cross-source denial, symlink confinement and activation after admission.
+- The upstream unbound suite now explicitly sets `persistence.unbound_write=refuse`: its assertions and database-only protections remain unchanged; the fork's unset classic-mode default has its own native regression suite.
+- Reranker tests reproduced 10 failures before implementation. Native Postgres reproduced the unmanaged owner refusal before the port; test expectations for pending replies and conflict-state classification were corrected to the current upstream contract.
+- Typecheck and build passed; the staged binary reports `0.60.243.0`. The first verification run passed 78/79 checks; the only failure was a documentation size cap, fixed by condensing the entry. The final full verification run passed all 79 checks (zero failures or skips).
+- The disposable Postgres container was stopped and removed after validation.
+- No real-provider calls, full unit matrix or full PostgreSQL E2E matrix were run. This is focused integration evidence, not deployment acceptance. No live database, configuration, installation or service was changed, and no push was performed.

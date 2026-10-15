@@ -31,7 +31,7 @@ export async function checkSearchMode(engine: BrainEngine): Promise<Check> {
 
     const { loadSearchModeConfig, resolveSearchMode } = await import('../../../core/search/mode.ts');
     const loaded = await loadSearchModeConfig(engine);
-    const resetReranker = resolveSearchMode({ mode: loaded.mode }).reranker_model;
+    const resetReranker = resolveSearchMode({ mode: loaded.mode, defaultRerankerModel: loaded.defaultRerankerModel }).reranker_model;
     const context = !mode
       ? 'search.mode is unset (using balanced fallback). Run `gbrain search modes` to see what is running and pick a mode explicitly.'
       : overrideKeys.length === 0

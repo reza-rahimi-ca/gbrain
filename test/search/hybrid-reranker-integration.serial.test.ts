@@ -29,6 +29,7 @@ import {
   configureGateway,
   resetGateway,
   __setEmbedTransportForTests,
+  __setRerankTransportForTests,
 } from '../../src/core/ai/gateway.ts';
 import type { PageInput, SearchOpts, SearchResult } from '../../src/core/types.ts';
 import type { RerankInput, RerankResult } from '../../src/core/ai/gateway.ts';
@@ -498,4 +499,33 @@ describe('#4648 malformed pass-through — meta stamp + caller onPassThrough cha
       rmSync(auditDir, { recursive: true, force: true });
     }
   });
+});
+
+
+test('OpenRouter-only default reaches bare and cached hybrid reranking; explicit pins still win', async () => {
+  configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: DIMS,
+    env: { OPENAI_API_KEY: 'sk-test', OPENROUTER_API_KEY: 'test-key' } });
+  stubEmbeddings();
+  try {
+    for (const search of [hybridSearch, hybridSearchCached]) {
+      for (const pin of [undefined, 'openrouter:voyageai/rerank-2.5']) {
+        if (pin) await engine.setConfig('search.reranker.model', pin);
+        else await engine.unsetConfig('search.reranker.model');
+        const models: string[] = [];
+        __setRerankTransportForTests(async (_url, init) => {
+          const input = JSON.parse(String(init!.body));
+          models.push(input.model);
+          return Response.json({ results: input.documents.map((_: string, index: number) => ({ index, relevance_score: 1 - index * 0.1 })) });
+        });
+        const result = await search(engine, 'alpha keyword', { mode: 'balanced', expansion: false });
+        expect(result.length).toBeGreaterThan(0);
+        expect(models).toEqual([(pin ?? 'openrouter:voyageai/rerank-3-lite').replace('openrouter:', '')]);
+      }
+    }
+  } finally {
+    __setRerankTransportForTests(null);
+    await engine.unsetConfig('search.reranker.model');
+    configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: DIMS, env: { OPENAI_API_KEY: 'sk-test' } });
+    stubEmbeddings();
+  }
 });

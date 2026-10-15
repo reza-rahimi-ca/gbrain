@@ -12,6 +12,21 @@ use `get_page` and `put_page`, then check the durable receipt."* Or: *"Inspect m
 writer owners with `gbrain sources writer status --probe --json` before changing
 the setup."*
 
+## Fork compatibility: unmanaged Postgres
+
+With managed persistence disabled, an unowned filesystem source and no explicit
+`persistence.unbound_write` setting, page mutations and fenced `remember` use the
+journal for the database write, then mirror the current page through the classic
+source filesystem lock. No owner is claimed and managed mode is not activated.
+The receipt reports `write_through.mirror: legacy_unmanaged` plus the file result.
+A failed mirror does not roll back the committed database write. This is
+best-effort compatibility, not atomic managed filesystem publication.
+
+Explicit `sync.write_through=false`, `persistence.unbound_write` policies,
+connector state directories, read-only mirrors and sandbox restrictions remain
+in force. PGLite and managed-mode ownership behavior are unchanged. Replay keeps
+the original mirror receipt and does not overwrite a newer page with old content.
+
 ## Read, edit, and retry
 
 Read an existing page with `get_page` and `include_content: true`. Preserve its

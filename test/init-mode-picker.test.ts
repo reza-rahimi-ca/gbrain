@@ -153,6 +153,14 @@ describe('resolveModePickerInputs: keys through mergedProviderEnv and reranker r
     });
   });
 
+  test('OpenRouter-only keys provide both chat and the default reranker', async () => {
+    await inHome({ OPENROUTER_API_KEY: 'test-key' }, async () => {
+      const inputs = await resolveModePickerInputs(engine);
+      expect(inputs).toMatchObject({ hasChatKey: true, hasRerankKey: true });
+      expect(recommendModeFor(inputs).mode).toBe('tokenmax');
+    });
+  });
+
   test('GEMINI_API_KEY counts as a chat key', async () => {
     await inHome({ GEMINI_API_KEY: 'gm-test-stub' }, async () => {
       expect((await resolveModePickerInputs(engine)).hasChatKey).toBe(true);

@@ -50,6 +50,7 @@ export async function resolveCacheSearchMode(engine: BrainEngine, opts: HybridSe
     // server-default-mode cache row.
     mode: opts?.mode ?? modeInputForCache.mode,
     overrides: modeInputForCache.overrides,
+    defaultRerankerModel: modeInputForCache.defaultRerankerModel,
     perCall: {
       cache_enabled: opts?.useCache,
       tokenBudget: opts?.tokenBudget,

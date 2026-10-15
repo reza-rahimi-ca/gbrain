@@ -626,8 +626,7 @@ async function writeNewInstallRerankerDefault(
       engine.getConfig('search.reranker.enabled'),
     ]);
     if (existingModel || existingEnabled != null) return;
-    const { DEFAULT_RERANKER_MODEL } = await import('../core/ai/defaults.ts');
-    const { rerankerReadiness } = await import('../core/ai/reranker-readiness.ts');
+    const { resolveDefaultRerankerModel } = await import('../core/ai/reranker-readiness.ts');
     const { mergedProviderEnv } = await import('../core/ai/provider-env.ts');
     // Same plane the CLI hands the gateway: env > file > DB-plane provider keys
     // (a `--force` re-init of a brain whose Voyage key lives only in the config
@@ -638,11 +637,11 @@ async function writeNewInstallRerankerDefault(
       const { loadConfigWithEngine } = await import('../core/config.ts');
       mergedCfg = await loadConfigWithEngine(engine as any, fileCfg);
     } catch { mergedCfg = fileCfg; }
-    const readiness = rerankerReadiness(DEFAULT_RERANKER_MODEL, mergedProviderEnv(mergedCfg, process.env));
+    const { model, readiness } = resolveDefaultRerankerModel(mergedProviderEnv(mergedCfg, process.env));
     if (readiness.ready) {
       // Nothing to write: the bundle default already resolves to it.
       console.log(
-        `  Reranker: ${DEFAULT_RERANKER_MODEL} (mode-bundle default` +
+        `  Reranker: ${model} (mode-bundle default` +
         `${readiness.requiredKey ? `; same ${readiness.requiredKey}` : ''})`,
       );
       return;

@@ -110,3 +110,30 @@ describe('writeNewInstallRerankerDefault (v0.48.2)', () => {
     });
   });
 });
+
+
+describe('OpenRouter-only reranker initialization', () => {
+  for (const plane of ['env', 'file', 'database'] as const) {
+    test(`${plane} OpenRouter key keeps reranking enabled without pinning a model`, async () => {
+      const home = emptyHome();
+      if (plane === 'file') {
+        fs.mkdirSync(path.join(home, '.gbrain'), { recursive: true });
+        fs.writeFileSync(path.join(home, '.gbrain/config.json'), JSON.stringify({ openrouter_api_key: 'test-key' }));
+      }
+      await withEnv({ GBRAIN_HOME: home, VOYAGE_API_KEY: undefined, OPENROUTER_API_KEY: plane === 'env' ? 'test-key' : undefined }, async () => {
+        const { engine, writes } = stubEngine(plane === 'database' ? { openrouter_api_key: 'test-key' } : {});
+        await quiet(() => writeNewInstallRerankerDefault(engine, 'openrouter:voyageai/voyage-4'));
+        expect(writes).toEqual([]);
+      });
+    });
+  }
+  test('OpenRouter key never rewrites an explicit legacy model or disabled setting', async () => {
+    await withEnv({ GBRAIN_HOME: emptyHome(), VOYAGE_API_KEY: undefined, OPENROUTER_API_KEY: 'test-key' }, async () => {
+      for (const existing of [{ 'search.reranker.model': 'openrouter:voyageai/rerank-2.5' }, { 'search.reranker.enabled': 'false' }] as Record<string, string>[]) {
+        const { engine, writes } = stubEngine(existing);
+        await quiet(() => writeNewInstallRerankerDefault(engine, 'openrouter:voyageai/voyage-4'));
+        expect(writes).toEqual([]);
+      }
+    });
+  });
+});

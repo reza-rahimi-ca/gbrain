@@ -81,7 +81,7 @@ import {
 async function resolveEffectiveLimit(ctx: OperationContext, p: Record<string, unknown>): Promise<number> {
   const perCallMode = resolvePerCallMode(ctx, p.mode);
   const modeInput = await loadSearchModeConfig(ctx.engine);
-  const resolved = resolveSearchMode({ mode: perCallMode ?? modeInput.mode, overrides: modeInput.overrides });
+  const resolved = resolveSearchMode({ ...modeInput, mode: perCallMode ?? modeInput.mode });
   return (p.limit as number) || resolved.searchLimit;
 }
 
