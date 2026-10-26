@@ -22,7 +22,6 @@ import {
   scaffold,
   scanMigrations,
 } from '../../scripts/build-schema-migrations.ts';
-import { baseMigrations } from '../../scripts/check-schema-migration-order.ts';
 import { LATEST_VERSION, MIGRATIONS } from '../../src/core/migrate.ts';
 import { LATEST_SCHEMA_VERSION } from '../../src/core/schema-migrations/latest.generated.ts';
 
@@ -175,11 +174,37 @@ describe('generator diagnostics (FAIL/Why/Fix/See)', () => {
 
 describe('out-of-order landing check', () => {
   test('reads the base ref versions (pre-W3 base parses migrate.ts literals)', () => {
-    const r = spawnSync('git', ['rev-parse', '--verify', '-q', 'origin/master^{commit}'], { cwd: REPO });
-    if (r.status !== 0) return; // no origin/master in this checkout; the CI verify job fetches it
-    const base = baseMigrations('origin/master');
-    expect(base.size).toBeGreaterThan(150);
-    expect(base.get(2)).toBe('slugify_existing_pages');
+    // A fork's origin/master can predate W3 or be absent. Exercise the actual
+    // historical parser against a committed fixture, not the checkout's refs.
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-migration-base-'));
+    dirs.push(root);
+    mkdirSync(join(root, 'src/core'), { recursive: true });
+    writeFileSync(join(root, 'src/core/migrate.ts'), `
+      export const MIGRATIONS = [
+        { version: 2, name: 'slugify_existing_pages', sql: '' },
+        { version: 23, name: 'later_schema', sql: '' },
+        { version: 15, name: 'historical_order', sql: '' },
+        { version: 160, name: 'last_literal', sql: '' },
+      ];
+    `);
+    const git = (...args: string[]) => {
+      const r = spawnSync('git', args, { cwd: root, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' } });
+      expect(r.status).toBe(0);
+    };
+    git('init', '-q');
+    git('add', '.');
+    git('-c', 'user.email=alice-example@example.com', '-c', 'user.name=alice-example', 'commit', '-q', '-m', 'legacy base');
+    git('update-ref', 'refs/remotes/base/master', 'HEAD');
+    const script = `import { baseMigrations } from ${JSON.stringify(join(REPO, 'scripts/check-schema-migration-order.ts'))}; console.log(JSON.stringify([...baseMigrations('base/master')]));`;
+    const parsed = spawnSync('bun', ['-e', script], {
+      encoding: 'utf8',
+      env: { ...process.env, GBRAIN_GUARD_ROOT: root },
+    });
+    expect(parsed.status).toBe(0);
+    expect(JSON.parse(parsed.stdout)).toEqual([
+      [2, 'slugify_existing_pages'], [23, 'later_schema'],
+      [15, 'historical_order'], [160, 'last_literal'],
+    ]);
   });
 
   test('a new migration numbered at or below the base latest fails; above passes; a reused version fails', () => {
