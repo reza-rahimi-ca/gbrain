@@ -41,7 +41,7 @@ const logger = { warn: (message: string) => process.stderr.write(`${message}\n`)
  * Both publication lanes run this for timed-out callers; wait/replay also completes it.
  */
 export async function mirrorUnmanagedWrite(engine: BrainEngine, row: WriteRequest): Promise<WriteRequest> {
-  if (row.state !== 'committed' || row.authority.databaseOnlyReason !== UNMANAGED_NO_OWNER || mirrored(row)
+  if (engine.kind !== 'postgres' || row.state !== 'committed' || row.authority.databaseOnlyReason !== UNMANAGED_NO_OWNER || mirrored(row)
     || (row.outcome?.write_through as { skipped?: string } | undefined)?.skipped !== UNMANAGED_NO_OWNER) return row;
   let result: Record<string, unknown>;
   try {
