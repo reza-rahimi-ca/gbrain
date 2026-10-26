@@ -471,6 +471,7 @@ export async function runSkillifyCheckInline(args: string[]): Promise<void> {
     : args.filter(a => !a.startsWith('--'));
 
   if (targets.length === 0) {
+    if (json) console.log('[]');
     console.error('No targets. Pass a path or --recent.');
     process.exit(1);
   }

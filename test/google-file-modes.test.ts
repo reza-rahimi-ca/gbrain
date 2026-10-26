@@ -22,6 +22,8 @@ afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 async function child(scenario: string, dir: string, extra: Record<string, unknown> = {}) {
   const env: Record<string, string | undefined> = { ...process.env, GBRAIN_HOME: join(base, 'home'), FILE_MODES_TOKEN: 'synthetic-local-fixture',
+    // This child uses only a fake API; quota pacing is covered by its own tests.
+    GBRAIN_GMAIL_FETCH_GAP_MS: '0',
     GBRAIN_TEST_FILE_MODES: JSON.stringify({ scenario, base: dir, ...extra }) };
   delete env.DATABASE_URL;
   delete env.GBRAIN_DATABASE_URL;

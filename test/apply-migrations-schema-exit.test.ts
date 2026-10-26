@@ -8,7 +8,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -134,8 +134,13 @@ describe('apply-migrations with Postgres unreachable stays non-fatal and says so
     const driver = writeSchemaDriver(home, { migrations: ['noop'], args: [], entry: 'argv' });
     const bin = join(home, 'bin');
     mkdirSync(bin);
-    writeFileSync(join(bin, 'gbrain'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} --no-env-file ${JSON.stringify(driver)} "$@"\n`, { mode: 0o755 });
-    const r = spawnSync(process.execPath, ['--no-env-file', join(REPO, 'scripts/postinstall.ts')], {
+    writeFileSync(join(bin, 'gbrain'), '#!/bin/sh\nexit 91\n', { mode: 0o755 });
+    const pkg = join(home, 'package');
+    mkdirSync(join(pkg, 'scripts'), { recursive: true });
+    copyFileSync(join(REPO, 'scripts/postinstall.ts'), join(pkg, 'scripts/postinstall.ts'));
+    copyFileSync(driver, join(pkg, 'cli.ts'));
+    writeFileSync(join(pkg, 'package.json'), JSON.stringify({ bin: { gbrain: 'cli.ts' } }));
+    const r = spawnSync(process.execPath, ['--no-env-file', join(pkg, 'scripts/postinstall.ts')], {
       cwd: home,
       env: { HOME: home, GBRAIN_HOME: home, PATH: `${bin}:/usr/bin:/bin`, GBRAIN_SKIP_REFERENCE_SWEEP: '1' },
       encoding: 'utf8', timeout: 120_000,

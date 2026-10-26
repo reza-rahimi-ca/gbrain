@@ -11,14 +11,16 @@
 
 import { describe, test, expect } from 'bun:test';
 import { join } from 'path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const REPO = join(__dirname, '..');
 const SCRIPT = join(REPO, 'scripts', 'skillify-check.ts');
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 
-async function run(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+async function run(args: string[], cwd = REPO): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const child = Bun.spawn([process.execPath, 'run', SCRIPT, ...args], {
-    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', cwd: REPO,
+    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', cwd,
   });
   const timer = setTimeout(() => child.kill('SIGKILL'), 30_000);
   try {
@@ -79,6 +81,17 @@ describe('skillify-check CLI', () => {
       expect(typeof parsed[0].score).toBe('number');
       expect(typeof parsed[0].recommendation).toBe('string');
     }
+  });
+
+  test('--recent --json emits an empty array when no files qualify', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-skillify-empty-'));
+    try {
+      writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'empty-fixture' }));
+      const result = await run(['--recent', '--json'], root);
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.stdout)).toEqual([]);
+      expect(result.stderr).toContain('No targets.');
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   test('bogus target reports `Code file exists: false` as a required gap', async () => {
