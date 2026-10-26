@@ -11,8 +11,6 @@
 
 import { describe, test, expect } from 'bun:test';
 import { join } from 'path';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 
 const REPO = join(__dirname, '..');
 const SCRIPT = join(REPO, 'scripts', 'skillify-check.ts');
