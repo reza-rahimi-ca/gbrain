@@ -2680,7 +2680,7 @@
         "kind": "interface",
         "members": [
           "anthropic_api_key?: string | undefined",
-          "autopilot?: { nightly_quality_probe?: { enabled?: boolean; max_usd?: number; }; conversation_parser_probe?: { enabled?: boolean; }; auto_drain?: { enabled?: boolean; window_seconds?: number; threshold?: number; max_usd_per_day?: number; }; incremental_extract_include_frontmatter?: boolean; } | undefined",
+          "autopilot?: { nightly_quality_probe?: { enabled?: boolean; max_usd?: number; }; conversation_parser_probe?: { enabled?: boolean; }; auto_drain?: { enabled?: boolean; window_seconds?: number; threshold?: number; max_usd_per_day?: number; max_windows_per_source_per_day?: number; }; incremental_extract_include_frontmatter?: boolean; } | undefined",
           "azure_openai_api_key?: string | undefined",
           "azure_openai_deployment?: string | undefined",
           "azure_openai_endpoint?: string | undefined",

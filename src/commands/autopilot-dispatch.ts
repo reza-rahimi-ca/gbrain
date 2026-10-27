@@ -21,6 +21,7 @@ import {
 } from './autopilot-remediation-policy.ts';
 import type { AutopilotDaemonState } from './autopilot-daemon.ts';
 import { logError } from './autopilot.ts';
+import { loadDrainDay, nextDrainWindow } from './autopilot-drain-policy.ts';
 
 /** Returns cycleOk: false only when the dispatch itself threw. */
 export async function dispatchAutopilotTick(
@@ -394,23 +395,6 @@ export const AUTO_DRAIN_NEXT_KIND_KEY = 'autopilot.auto_drain.next_kind';
 type AutoDrainKind = 'checkout' | 'connector';
 
 /**
- * #5856: units of today's drain jobs against the daily cap. Every started
- * attempt costs one (a waiting job one), so retried provider failures still
- * count; a job whose only attempt was a structural refusal spent nothing and
- * costs none.
- */
-async function autoDrainUnitsToday(engine: BrainEngine, utcDay: string): Promise<number> {
-  const { STRUCTURAL_REFUSAL_PREFIX } = await import('../core/cycle/extract-atoms-drain.ts');
-  const rows = await engine.executeRaw<{ cnt: number }>(
-    `SELECT COALESCE(sum(CASE WHEN status = 'dead' AND attempts_started <= 1
-         AND left(COALESCE(error_text, ''), length($2::text)) = $2::text THEN 0 ELSE GREATEST(attempts_started, 1) END), 0)::int AS cnt
-       FROM minion_jobs WHERE name = 'extract-atoms-drain' AND created_at >= $1::timestamptz`,
-    [`${utcDay}T00:00:00Z`, STRUCTURAL_REFUSAL_PREFIX],
-  );
-  return Number(rows[0]?.cnt ?? 0);
-}
-
-/**
  * The auto-drain submission pass behind dispatchAutoDrain's Postgres and
  * `autopilot.auto_drain.enabled` gates; exported so tests drive it on either engine. `now` is the clock seam for
  * the UTC-day slot.
@@ -443,20 +427,14 @@ export async function submitAutoDrains(
   const threshold = parsePosInt(await engine.getConfig('autopilot.auto_drain.threshold'), 25);
   const windowSeconds = parsePosInt(await engine.getConfig('autopilot.auto_drain.window_seconds'), 120);
   const maxUsdPerDay = parseNonNegFloat(await engine.getConfig('autopilot.auto_drain.max_usd_per_day'), 2.0);
-  // Each drain attempt runs under one BudgetTracker capped at ~$0.30
-  // (cycle.extract_atoms.budget_usd); bound the brain-wide daily attempt
-  // count instead of a real-time spend ledger.
-  const PER_RUN_USD = 0.3;
-  const maxJobsToday = Math.max(0, Math.floor(maxUsdPerDay / PER_RUN_USD));
+  const perAttemptUsd = parseNonNegFloat(await engine.getConfig('cycle.extract_atoms.budget_usd'), 0.3);
+  const maxWindows = parsePosInt(await engine.getConfig('autopilot.auto_drain.max_windows_per_source_per_day'), 6);
   const utcDay = new Date(now()).toISOString().slice(0, 10);
-
-  let submittedToday = 0;
-  try {
-    submittedToday = await autoDrainUnitsToday(engine, utcDay);
-  } catch {
-    // count is best-effort; treat as 0 (cap still bounds submits this tick).
-  }
-  if (submittedToday >= maxJobsToday) return;
+  if (perAttemptUsd <= 0 || maxUsdPerDay <= 0) return;
+  // A failed ledger read propagates: unknown spend never grants a fresh allowance.
+  const day = await loadDrainDay(engine, utcDay, perAttemptUsd);
+  let chargedUsd = day.chargedUsd;
+  if (chargedUsd + perAttemptUsd > maxUsdPerDay + 1e-9) return;
 
   const { countExtractAtomsBacklog } = await import('../core/cycle/extract-atoms.ts');
   const { atomDrainOwnerRefusal } = await import('../core/persistence/atom-maintenance.ts');
@@ -469,7 +447,7 @@ export async function submitAutoDrains(
   }
   const pointer: AutoDrainKind = (await engine.getConfig(AUTO_DRAIN_NEXT_KIND_KEY)) === 'connector' ? 'connector' : 'checkout';
   let next = pointer;
-  while (submittedToday < maxJobsToday) { // brain-wide daily cap (fairness)
+  while (chargedUsd + perAttemptUsd <= maxUsdPerDay + 1e-9) {
     const kind: AutoDrainKind = byKind[next].length ? next : next === 'checkout' ? 'connector' : 'checkout';
     const src = byKind[kind].shift();
     if (!src) break;
@@ -487,11 +465,12 @@ export async function submitAutoDrains(
         continue;
       }
     }
-    // Time-sloted key (CODEX #2): a static key would block the
-    // source FOREVER once the first job completes. A new UTC-day
-    // slot reopens it each day; it also bounds a structural refusal
-    // to one dead job per source per day.
-    const idemKey = `autopilot-extract-atoms-drain:${src.id}:${utcDay}`;
+    // One numbered window per source per tick, deduplicated across restarts.
+    // Only clean progress reopens a same-day slot; failures stop until tomorrow.
+    const window = nextDrainWindow(day.jobs, src.id, utcDay, maxWindows);
+    if (window === null) continue;
+    const prefix = `autopilot-extract-atoms-drain:${src.id}:${utcDay}`;
+    const idemKey = window === 1 ? prefix : `${prefix}:${window}`;
     try {
       // CODEX (impl review #4): DO NOT use maxWaiting here — it
       // coalesces by (name, queue), NOT by source, so source B's
@@ -507,9 +486,9 @@ export async function submitAutoDrains(
         `SELECT 1 AS one FROM minion_jobs WHERE idempotency_key = $1 LIMIT 1`,
         [idemKey],
       );
-      if (dupe.length > 0) continue; // already queued/drained for this source today
+      if (dupe.length > 0) continue;
       const backlog = await countExtractAtomsBacklog(engine, src.id);
-      if (backlog === null || backlog <= threshold) continue;
+      if (backlog === null || backlog <= (window === 1 ? threshold : 0)) continue;
       // #5856: the drain's writer preflight would refuse this source (no
       // active local owner); submitting it would only dead-letter.
       const refusal = await atomDrainOwnerRefusal(engine, src.id);
@@ -520,19 +499,18 @@ export async function submitAutoDrains(
       }
       const job = await queue.add(
         'extract-atoms-drain',
-        { sourceId: src.id, window: windowSeconds, ...(kind === 'checkout' ? { repoPath: src.local_path } : {}) },
+        { sourceId: src.id, window: windowSeconds, budgetUsd: perAttemptUsd, ...(kind === 'checkout' ? { repoPath: src.local_path } : {}) },
         {
           queue: 'default',
           idempotency_key: idemKey,
-          // issue #3218: the handler now throws on an
-          // all-provider-failed batch, so give the queue's
-          // backoff a chance (was 1 — dead-lettered instantly).
-          max_attempts: 3,
+          // A failed automatic window stops this source for the day. Clean
+          // continuation gets its own reserved budget on a later tick.
+          max_attempts: 1,
           timeout_ms: timeoutMs,
         },
         { allowProtectedSubmit: true },
       );
-      submittedToday++;
+      chargedUsd += perAttemptUsd;
       next = kind === 'checkout' ? 'connector' : 'checkout';
       if (jsonMode) {
         process.stderr.write(JSON.stringify({

@@ -167,15 +167,19 @@ export const openrouterCompatFetch = (async (
     rewriteOpenRouterErrorEnvelopeStatus(
       await deepseekReasoningContentCompatFetch(input as any, nextInit as any),
     );
-  if (!init?.headers) return promote(init);
-  const headers = new Headers(init.headers as any);
-  if (!headers.has(OPENROUTER_CACHE_HEADER)) return promote(init);
+  const headers = new Headers(init?.headers as any);
+  const cache = headers.has(OPENROUTER_CACHE_HEADER);
   headers.delete(OPENROUTER_CACHE_HEADER);
-  let body = init.body;
+  let body = init?.body;
   if (typeof body === 'string') {
     try {
       const parsed = JSON.parse(body);
-      const rewritten = withSystemCacheControl(parsed);
+      let rewritten = cache ? withSystemCacheControl(parsed) : parsed;
+      // The router, not a static model allowlist, selects endpoints that can
+      // enforce the requested schema. Preserve other routing/privacy options.
+      if (parsed?.response_format?.type === 'json_schema') {
+        rewritten = { ...rewritten, provider: { ...parsed.provider, require_parameters: true } };
+      }
       if (rewritten !== parsed) {
         body = JSON.stringify(rewritten);
         headers.delete('content-length');
@@ -334,6 +338,8 @@ export const openrouter: Recipe = {
         'deepseek/deepseek-chat',
       ],
       supports_tools: true,
+      // Endpoint support is enforced per request by require_parameters above.
+      supports_structured_outputs: true,
       supports_subagent_loop: openrouterSupportsSubagentLoop,
       // Family-scoped: OpenAI routes cache automatically; Anthropic routes
       // cache via the compat fetch shim's cache_control rewrite.

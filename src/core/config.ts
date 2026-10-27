@@ -229,8 +229,10 @@ export interface GBrainConfig {
       window_seconds?: number;
       /** Backlog must exceed this to trigger a drain. Default 25. */
       threshold?: number;
-      /** Daily spend cap (USD); bounds drains/day = floor(cap / ~$0.30). Default 2.0. */
+      /** Daily estimated spend + pending-attempt reservation cap (USD). Default 2.0. */
       max_usd_per_day?: number;
+      /** Hard bound on per-source windows even for zero-cost work. Default 6. */
+      max_windows_per_source_per_day?: number;
     };
     /**
      * v0.42 — extract frontmatter (`sources:`/`related:` etc.) link edges too, not

@@ -116,6 +116,9 @@ export interface ExtractAtomsDrainDeps {
     budget?: { spentUsd: number; capUsd: number };
     /** #6503: items the batch cut at `cycle.extract_atoms.max_input_chars` (partial disposition, not complete). */
     inputTruncated?: number;
+    /** Item dispositions, independent of atom count and backlog eligibility. */
+    progress?: Partial<DrainItemProgress>;
+    warned?: boolean;
   }>;
   /**
    * Count remaining eligible-but-unextracted pages, or null on query error.
@@ -126,7 +129,18 @@ export interface ExtractAtomsDrainDeps {
   /** Injectable clock. Production: Date.now. */
   now: () => number;
   /** Optional progress sink (one line per batch). */
-  onBatch?: (info: { batch: number; extracted: number; remaining: number | null }) => void;
+  onBatch?: (info: { batch: number; extracted: number; before: number | null; remaining: number | null }) => unknown;
+}
+
+export interface DrainItemProgress {
+  pages_processed: number;
+  transcripts_processed: number;
+  zero_yield: number;
+  held_failed: number;
+  write_pending: number;
+  malformed_outputs: number;
+  stopped_outputs: number;
+  tombstoned_for_failures: number;
 }
 
 export interface ExtractAtomsDrainOpts {
@@ -172,16 +186,21 @@ export function structuralAtomRefusal(error: unknown): string | null {
 /** setTimeout fires at once past 2^31-1 ms; a longer window or deadline waits the maximum. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
-export interface ExtractAtomsDrainResult {
+export interface ExtractAtomsDrainResult extends DrainItemProgress {
   phase: 'extract_atoms';
   /**
    * issue #3218: 'provider_failure' when any batch reported `providerFailure`
    * (every item it attempted errored). The Minion handler throws on this
    * status so the durable job retries instead of completing over a backlog
-   * that made zero forward progress. Partial-success batches (>=1 item
-   * succeeded) always report 'ok', unchanged from before.
+   * that made zero forward progress. Item failures, held work, pending
+   * publication and truncated input produce 'partial', never a clean 'ok'.
    */
-  status: 'ok' | 'provider_failure';
+  status: 'ok' | 'partial' | 'provider_failure';
+  source_id?: string;
+  /** Eligible backlog before the first batch. Never inferred from the final count. */
+  initial_remaining: number | null;
+  /** False on hard stops, where remaining is only a last-known count. */
+  remaining_is_fresh: boolean;
   extracted: number;
   skipped: number;
   /** Eligible pages still pending (see DrainStop for hard stops). null if no count succeeded. */
@@ -212,9 +231,9 @@ export interface ExtractAtomsDrainResult {
    * reported one (`source: reason`), or null for a clean run.
    */
   last_error: string | null;
-  /** #6425: on a `budget` stop, the attempt's spend and its per-run cap (`cycle.extract_atoms.budget_usd`). */
-  spent_usd?: number;
-  budget_usd?: number;
+  /** Attempt-cumulative spend and cap on every stop; null when unavailable. */
+  spent_usd: number | null;
+  budget_usd: number | null;
   /** #6503: items cut at the input cap across every batch; the model did not read their tails and they are not marked complete. */
   input_truncated?: number;
 }
@@ -251,18 +270,26 @@ export async function runExtractAtomsDrain(
   // the returned `status`, independent of how `stopped` reads after the
   // final (possibly overriding) remaining-count check below.
   let providerFailure = false;
+  let warned = false;
   // #4539: accumulate per-item failure visibility across batches.
   let failureCount = 0;
   // #4730: bounded typed per-item records (batch order, sanitized).
   const failures: ExtractAtomsDrainFailure[] = [];
   let lastError: string | null = null;
   let lastCount: number | null = null;
+  let initialRemaining: number | null = null;
+  let countedInitial = false;
+  const progress: DrainItemProgress = { pages_processed: 0, transcripts_processed: 0, zero_yield: 0,
+    held_failed: 0, write_pending: 0, malformed_outputs: 0, stopped_outputs: 0, tombstoned_for_failures: 0 };
   let lockSignal: AbortSignal | null = null;
   let budget: { spentUsd: number; capUsd: number } | undefined;
   let inputTruncated = 0;
   const result = (stopped: DrainStop, remaining: number | null): ExtractAtomsDrainResult => ({
     phase: 'extract_atoms',
-    status: providerFailure ? 'provider_failure' : 'ok',
+    status: providerFailure ? 'provider_failure' : warned || failureCount > 0 || progress.held_failed > 0 || progress.write_pending > 0 || inputTruncated > 0 ? 'partial' : 'ok',
+    ...progress,
+    initial_remaining: initialRemaining,
+    remaining_is_fresh: !['deadline', 'aborted', 'lock_lost'].includes(stopped) && remaining !== null,
     extracted,
     skipped,
     remaining,
@@ -272,7 +299,8 @@ export async function runExtractAtomsDrain(
     failures,
     omitted_failure_count: failureCount - failures.length,
     last_error: lastError,
-    ...(stopped === 'budget' && budget ? { spent_usd: budget.spentUsd, budget_usd: budget.capUsd } : {}),
+    spent_usd: budget?.spentUsd ?? null,
+    budget_usd: budget?.capUsd ?? null,
     input_truncated: inputTruncated,
   });
   try {
@@ -321,14 +349,23 @@ export async function runExtractAtomsDrain(
           if (batches >= maxBatches) { stopped = 'max_batches'; break; }
 
           const before = await count();
+          if (!countedInitial) { initialRemaining = before; countedInitial = true; }
           if (hard.signal.aborted) break;
           if (before !== null) lastCount = before;
           if (before === 0) { stopped = 'drained'; break; }
 
           const r = await deps.runBatch({ signal: hard.signal, stopSignal: soft.signal });
           extracted += r.extracted;
+          warned ||= r.warned === true;
           skipped += r.skipped;
           inputTruncated += Math.max(0, Math.floor(Number(r.inputTruncated ?? 0)) || 0);
+          for (const key of Object.keys(progress) as Array<keyof DrainItemProgress>) {
+            const value = r.progress?.[key];
+            if (typeof value === 'number' && Number.isFinite(value) && value > 0) progress[key] += Math.floor(value);
+          }
+          if (r.budget && Number.isFinite(r.budget.spentUsd) && r.budget.spentUsd >= 0 && Number.isFinite(r.budget.capUsd)) {
+            budget = { spentUsd: Math.max(budget?.spentUsd ?? 0, r.budget.spentUsd), capUsd: r.budget.capUsd };
+          }
           batches++;
           // #4730: preserve typed per-item records (bounded, sanitized) while
           // keeping failure_count exact and reconcilable — count-only adapters
@@ -370,8 +407,14 @@ export async function runExtractAtomsDrain(
               MAX_DRAIN_FAILURE_SOURCE_CHARS + 2 + MAX_DRAIN_FAILURE_REASON_CHARS,
             );
           }
+          if (r.providerFailure) providerFailure = true;
           if (hard.signal.aborted) break;
-          deps.onBatch?.({ batch: batches, extracted: r.extracted, remaining: before });
+          if (deps.onBatch) {
+            const after = await count();
+            if (hard.signal.aborted) break;
+            if (after !== null) lastCount = after;
+            await deps.onBatch({ batch: batches, extracted: r.extracted, before, remaining: after });
+          }
 
           // issue #3218: every item this batch attempted failed (0 succeeded, >=1
           // error) — a total provider outage, not ordinary no-op/partial progress.
@@ -386,7 +429,6 @@ export async function runExtractAtomsDrain(
 
           // #6425: the attempt's one BudgetTracker is spent, so no later batch can progress.
           if ((r.budgetSkipped ?? 0) > 0) {
-            budget = r.budget;
             stopped = 'budget';
             break;
           }
@@ -398,7 +440,7 @@ export async function runExtractAtomsDrain(
           // #2144: a zero-ATOM batch can still be progress — tombstoned
           // zero-yield pages shrink the backlog without producing atoms. Only
           // stop when the backlog count genuinely didn't move.
-          if (r.extracted === 0 && r.skipped === 0) {
+          if (r.progress ? !(r.progress.pages_processed || r.progress.transcripts_processed) : r.extracted === 0 && r.skipped === 0) {
             const after = await count();
             if (hard.signal.aborted) break;
             if (after !== null) lastCount = after;
@@ -475,6 +517,8 @@ export interface DrainForSourceOpts {
   signal?: AbortSignal;
   /** #5809: the Minion job's `deadlineAtMs`. */
   deadlineAtMs?: number | null;
+  /** Optional scheduler reservation; may lower, never raise the configured attempt cap. */
+  budgetUsd?: number;
 }
 
 export async function runExtractAtomsDrainForSource(
@@ -492,9 +536,9 @@ export async function runExtractAtomsDrainForSource(
   const lockId = cycleLockIdFor(opts.sourceId);
   // #5856/#5854: one call is one attempt; its batches share one BudgetTracker
   // (the per-run cap holds for the whole attempt) and one publish wait.
-  const attempt: NonNullable<ExtractAtomsOpts['attempt']> = { writeWait: new MaintenanceWriteWait(opts.deadlineAtMs ?? null) };
+  const attempt: NonNullable<ExtractAtomsOpts['attempt']> = { writeWait: new MaintenanceWriteWait(opts.deadlineAtMs ?? null), budgetUsd: opts.budgetUsd };
 
-  return runExtractAtomsDrain(
+  const result = await runExtractAtomsDrain(
     {
       withLock: (work) => withRefreshingLock(engine, lockId, (signal) => work(signal), { ttlMinutes: 5 }),
       runBatch: async ({ signal, stopSignal }) => {
@@ -532,15 +576,26 @@ export async function runExtractAtomsDrainForSource(
               typeof (f as { error?: unknown }).error === 'string',
           )
           .map(({ source, error }) => ({ source, reason: error }));
+        const budgetSkipped = Number(d.pages_skipped_budget ?? 0) + Number(d.transcripts_skipped_budget ?? 0);
+        const warned = r.status === 'warn' && budgetSkipped === 0;
         return {
           extracted: Number(d.atoms_extracted ?? 0),
           skipped: Number(d.duplicates_skipped ?? 0),
           providerFailure: failures.length > 0 && itemsSucceeded === 0,
           failureCount: failures.length,
+          warned,
+          firstError: warned && failures.length === 0 ? r.summary : undefined,
           failures: typedFailures,
-          budgetSkipped: Number(d.pages_skipped_budget ?? 0) + Number(d.transcripts_skipped_budget ?? 0),
-          budget: { spentUsd: Number(d.estimated_spend_usd ?? 0), capUsd: Number(d.budget_usd ?? 0) },
+          budgetSkipped,
+          budget: { spentUsd: attempt.budgetTracker?.totalSpent ?? Number(d.estimated_spend_usd ?? 0), capUsd: attempt.budgetTracker?.cap ?? Number(d.budget_usd ?? opts.budgetUsd ?? 0) },
           inputTruncated: Number(d.input_truncated ?? 0),
+          progress: {
+            pages_processed: Number(d.pages_processed ?? 0), transcripts_processed: Number(d.transcripts_processed ?? 0),
+            zero_yield: Number(d.zero_yield ?? 0), held_failed: Number(d.held_failed ?? 0), write_pending: Number(d.write_pending ?? 0),
+            malformed_outputs: Number(d.malformed_outputs ?? 0), stopped_outputs: Number(d.stopped_outputs ?? 0),
+            tombstoned_for_failures: (Array.isArray(d.tombstoned_for_failures) ? d.tombstoned_for_failures.length : 0)
+              + (Array.isArray(d.tombstoned_transcripts) ? d.tombstoned_transcripts.length : 0),
+          },
         };
       },
       countRemaining: (signal) => countExtractAtomsBacklog(engine, extractionSourceId, { signal }),
@@ -554,4 +609,5 @@ export async function runExtractAtomsDrainForSource(
       deadlineAtMs: opts.deadlineAtMs,
     },
   );
+  return { ...result, source_id: extractionSourceId };
 }

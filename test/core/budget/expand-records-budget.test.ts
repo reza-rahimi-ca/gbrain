@@ -336,6 +336,40 @@ describe('expand() failure-path accounting (#4121 extension — .failed pessimis
   });
 });
 
+// /ship Step 7 coverage extension (G1).
+// Value: protects=OpenRouter expansion never downgrades a rejected schema or poisons another routed model;
+// fails_when=rejection invokes the text transport or disables structured output for a later routed model;
+// why_new=existing rejection cases use a synthetic non-router recipe whose fallback policy differs;
+// seam=none; no_claim=live provider acceptance or expansion quality (synthetic transports).
+test('routed expansion rejects a schema once, records the failure, and keeps the next model structured', async () => {
+  configureGateway({ expansion_model: 'openrouter:z-ai/glm-5.3-flash', env: { OPENROUTER_API_KEY: 'synthetic-key' } });
+  const structuredModels: string[] = [];
+  let textCalls = 0;
+  __setGenerateObjectTransportForTests(async (args: any) => {
+    structuredModels.push(args.model.modelId);
+    if (structuredModels.length === 1) {
+      throw Object.assign(new Error('response_format json_schema unsupported'), { name: 'AI_APICallError', statusCode: 400 });
+    }
+    return { object: { queries: ['a structured alternative'] }, usage: { inputTokens: 20, outputTokens: 10 } } as any;
+  });
+  __setGenerateTextTransportForTests(async () => {
+    textCalls++;
+    return { text: '{"queries":["unsafe fallback"]}', usage: { inputTokens: 20, outputTokens: 10 } } as any;
+  });
+  const tracker = new BudgetTracker({ label: 'routed-expansion', auditPath });
+  await withBudgetTracker(tracker, async () => {
+    expect(await expand('original query')).toEqual(['original query']);
+    expect(structuredModels).toEqual(['z-ai/glm-5.3-flash']);
+    expect(textCalls).toBe(0);
+    configureGateway({ expansion_model: 'openrouter:openai/gpt-5.2', env: { OPENROUTER_API_KEY: 'synthetic-key' } });
+    expect(await expand('another query')).toEqual(['another query', 'a structured alternative']);
+  });
+  expect(structuredModels).toEqual(['z-ai/glm-5.3-flash', 'openai/gpt-5.2']);
+  expect(textCalls).toBe(0);
+  const billed = readAudit().filter(row => row.event === 'record' || row.event === 'record_unpriced');
+  expect(billed.map(row => row.sub_label)).toEqual(['gateway.expand.failed', 'gateway.expand']);
+});
+
 describe('normalizeSdkUsage legacy shape (#4121 fix-first)', () => {
   beforeEach(() => {
     configureGateway({

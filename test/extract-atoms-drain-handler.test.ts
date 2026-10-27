@@ -11,6 +11,8 @@ import { makeExtractAtomsDrainHandler } from '../src/core/minions/handlers/extra
 import type { MinionJobContext } from '../src/core/minions/types.ts';
 import { __setChatTransportForTests } from '../src/core/ai/gateway.ts';
 import { UnrecoverableError } from '../src/core/minions/errors.ts';
+import { withEnv } from './helpers/with-env.ts';
+import { waitFor } from './helpers/wait-for.ts';
 import {
   formatDrainProviderFailure,
   runExtractAtomsDrainForSource,
@@ -94,6 +96,7 @@ describe('extract-atoms-drain handler', () => {
     id: 1, name: 'extract-atoms-drain', attempts_made: 0,
     data: { sourceId: 'default', window: 120 },
     signal, deadlineAtMs, shutdownSignal: new AbortController().signal,
+    updateProgress: async () => {},
   }) as unknown as MinionJobContext;
   const seedEligiblePage = (slug: string) => engine.putPage(slug, {
     type: 'note', title: slug, compiled_truth: 'A durable decision recorded in prose. '.repeat(20),
@@ -152,4 +155,61 @@ describe('extract-atoms-drain handler', () => {
     expect(callSignals.length).toBeGreaterThan(0);
     for (const signal of callSignals) expect(signal).toBeInstanceOf(AbortSignal);
   });
+
+  // /ship Step 7 coverage extension (G8).
+  // Value: protects=queued drain reservations reach execution and terminal failures retain the full durable progress receipt;
+  // fails_when=handler drops budgetUsd or final updateProgress, or a terminal job promises an automatic retry;
+  // why_new=direct handler fixtures replace updateProgress with a no-op and never run reservation data through the worker;
+  // seam=none; no_claim=Postgres or child-process execution (real PGLite queue and inline worker, synthetic provider).
+  test('worker enforces a queued reservation and preserves diagnostics when the next drain dead-letters', async () => {
+    await withEnv({ ANTHROPIC_API_KEY: 'sk-test-drain-worker' }, async () => {
+      const sourceId = 'handler-reservation';
+      await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+      await engine.putPage('notes/reserved', { type: 'note', title: 'Reserved',
+        compiled_truth: 'A durable decision recorded in prose. '.repeat(20) } as never, { sourceId });
+      await engine.setConfig('models.dream.extract_atoms', 'anthropic:claude-haiku-4-5');
+      await engine.setConfig('cycle.extract_atoms.budget_usd', '0.3');
+      let calls = 0;
+      __setChatTransportForTests(async () => { calls++; throw new Error('synthetic provider unavailable'); });
+      const worker = new MinionWorker(engine, { queue: 'coverage-drain', pollInterval: 30, concurrency: 1 });
+      worker.register('extract-atoms-drain', makeExtractAtomsDrainHandler(engine));
+      const submit = (budgetUsd: number) => queue.add('extract-atoms-drain', { sourceId, window: 120, budgetUsd },
+        { queue: 'coverage-drain', max_attempts: 1, timeout_ms: 30_000 }, { allowProtectedSubmit: true });
+      const reserved = await submit(0.001);
+      const running = worker.start();
+      try {
+        const settled = async (id: number) => {
+          await waitFor(async () => ['completed', 'dead', 'failed', 'cancelled'].includes((await queue.getJob(id))!.status),
+            { timeoutMs: 15_000, intervalMs: 30, label: 'drain worker settles' });
+          return (await queue.getJob(id))!;
+        };
+        const first = await settled(reserved.id);
+        expect(first.status).toBe('completed');
+        expect(calls).toBe(0);
+        expect(first.result).toMatchObject({ source_id: sourceId, stopped: 'budget', budget_usd: 0.001,
+          pages_processed: 0, initial_remaining: 1, remaining: 1 });
+        expect(first.progress).toEqual(first.result);
+        expect(await engine.getConfig('cycle.extract_atoms.budget_usd')).toBe('0.3');
+        const failed = await settled((await submit(0.3)).id);
+        expect(failed.status).toBe('dead');
+        expect(calls).toBe(1);
+        expect(failed.error_text).toContain('synthetic provider unavailable');
+        expect(failed.error_text).not.toContain('retrying');
+        expect(failed.progress).toMatchObject({ phase: 'extract_atoms', source_id: sourceId,
+          status: 'provider_failure', stopped: 'provider_failure', failure_count: 1,
+          initial_remaining: 1, remaining: 1, remaining_is_fresh: true,
+          pages_processed: 0, budget_usd: 0.3 });
+        expect((failed.progress as ExtractAtomsDrainResult).failures).toEqual([
+          expect.objectContaining({ batch: 1, source: 'notes/reserved', reason: expect.stringContaining('synthetic provider unavailable') }),
+        ]);
+        expect((failed.progress as ExtractAtomsDrainResult).spent_usd).toBeGreaterThan(0);
+      } finally {
+        worker.stop();
+        await running;
+        __setChatTransportForTests(null);
+        await engine.unsetConfig('models.dream.extract_atoms');
+        await engine.unsetConfig('cycle.extract_atoms.budget_usd');
+      }
+    });
+  }, 40_000);
 });

@@ -40,7 +40,7 @@ describe('autopilot auto-drain wiring', () => {
   test('gates on the enabled flag and a daily spend cap (DECISION 3C)', () => {
     expect(SRC).toContain('autopilot.auto_drain.enabled');
     expect(SRC).toContain('autopilot.auto_drain.max_usd_per_day');
-    expect(SRC).toContain('maxJobsToday');
+    expect(SRC).toContain('chargedUsd + perAttemptUsd');
   });
 
   test('is Postgres-gated (PGLite has no worker surface)', () => {
@@ -51,13 +51,12 @@ describe('autopilot auto-drain wiring', () => {
   // all-provider-failed batch, max_attempts:1 made the queue's retry policy
   // "dead-letter on the first failure, no backoff attempt" — regression-guard
   // against silently reverting to 1.
-  test('issue #3218: submits with max_attempts 3 (not 1) so a retry can backoff before dead-lettering', () => {
+  test('automatic windows stop on failure instead of spending an unreserved retry', () => {
     // lastIndexOf: the queue.add(...) call site itself (the earlier occurrence
     // is the unrelated created_at count query above it in the same function).
     const callSite = DISPATCH_SRC.lastIndexOf("'extract-atoms-drain'");
     const drainBlock = DISPATCH_SRC.slice(callSite, callSite + 900);
-    expect(drainBlock).toContain('max_attempts: 3');
-    expect(drainBlock).not.toContain('max_attempts: 1');
+    expect(drainBlock).toContain('max_attempts: 1');
   });
 
   test('CODEX impl #4: no maxWaiting (it coalesces by name+queue, not source)', () => {

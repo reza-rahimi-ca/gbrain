@@ -152,7 +152,7 @@ line naming the cap, its source and how to remove it, e.g.
 | `onboard --auto` | `--max-usd` (per-call) | — | refuses without `--max-usd` (exit 2); manual-only steps (pack upgrade, takes bootstrap) never run, their commands are printed | `--max-usd off` | runs uncapped (still ledgered) |
 | Image-OCR per-run ceiling | `embedding_image_ocr_max_images` / `embedding_image_ocr_max_usd` | `200` images / `$1.00` (estimated) | skips OCR over-cap (import continues; skips counted in `ocr_skipped_budget`, surfaced by doctor `ocr_health`) | `0` disables that cap | **not** bypassed (per-run cap, not a tracker gate) |
 | Dream `extract_atoms` phase budget | `cycle.extract_atoms.budget_usd` | `0.30` | caps the phase's budget tracker (one tracker per drain attempt, across all its batches) | — | **not** consulted (phase budget enforces regardless) |
-| Atom auto-drain daily cap | `autopilot.auto_drain.max_usd_per_day` | `2.00` | daily cap on drain **attempts** (`floor(max / 0.30)` = 6), not a dollar ledger | `gbrain config set autopilot.auto_drain.enabled false` | **not** consulted |
+| Atom auto-drain daily cap | `autopilot.auto_drain.max_usd_per_day` | `2.00` | recorded estimated spend plus reserved pending-attempt caps | `gbrain config set autopilot.auto_drain.enabled false` | **not** consulted |
 | Connector email/meeting atoms | `cycle.extract_atoms.connector_pages` | on (unset) | Gmail/Calendar `email`/`meeting` pages are extracted like other pages, under the auto-drain cap | `false` | **not** consulted |
 | Life Chronicle event extraction | `chronicle.job_budget_usd` (per page) / `chronicle.auto_daily_limit` (calls per rolling 24 h) | `0.25` / `200` | caps one extraction call; past the daily limit pending pages wait for a free slot | `gbrain config set auto_chronicle false` | **not** consulted |
 | [Fence model repair (Tier 3)](#fence-model-repair-tier-3) | `fences.repair.max_usd_per_page` / `fences.repair.max_usd_per_day` | `0.30` / `1.00` | refuses the call: a page whose estimate is over the per-page cap or over today's remainder in the durable USD ledger (`llm_repair`/`fences`, per UTC day across every process) waits as `budget_exhausted`, and `gbrain repair fences --apply` stops there with exit 1. `--max-usd <n>` lowers a run's cap, never raises it | `gbrain config set fences.repair.llm false` (`0` on a cap = no model spend) | **not** consulted |
@@ -282,25 +282,39 @@ estimate is `delta + stale backlog`, labeled as such.
 **Say to your agent:** *"Extract atoms from my Gmail and Calendar pages too"* or
 *"Stop spending on automatic atom extraction."*
 
-When the active schema pack does not run `extract_atoms` in the routine cycle,
-autopilot (Postgres brains) submits a bounded `extract-atoms-drain` job per
-source with a backlog. Each drain **attempt** runs under one BudgetTracker
-capped at `cycle.extract_atoms.budget_usd` ($0.30 by default), shared by all of
-its batches. The daily cap `autopilot.auto_drain.max_usd_per_day` ($2.00) is a
-count of attempts at that per-attempt estimate (6 a day), so a retried job
-uses one slot per attempt. A job refused before any model call (no active
-canonical owner on this host, untrusted caller) dead-letters once with
-`structural_refusal:` and uses no slot; autopilot also skips a source whose
-writer would refuse, and logs why. Checkout-backed and connector sources take
-turns for the daily slots. With a model the tracker cannot price (the
-extraction chat model or the embedding route), the default dollar limit is not
-enforced and the phase warns and runs; only the attempt count bounds the drain.
-When you set `cycle.extract_atoms.budget_usd` yourself, an unpriced model
-instead stops the run before any model call: the phase reports `warn` with
-`details.no_pricing` (model, provider, kind, units, `register_command`), the
-stop counts as an expected limit rather than a halt in `extract_health`, and
-`gbrain doctor` names the command until you register the price with
-`gbrain pricing set` (see [registering a model price](#registering-a-model-price)).
+Autopilot (Postgres brains) submits a bounded `extract-atoms-drain` job per
+backlogged source. Each attempt shares one BudgetTracker across its batches,
+capped at `cycle.extract_atoms.budget_usd` ($0.30 by default). The job carries
+that reservation, so later configuration changes cannot increase its allowance.
+The daily cap `autopilot.auto_drain.max_usd_per_day` ($2.00) counts recorded
+estimated spend plus full reservations for unfinished jobs, including carry-over
+work and older jobs' possible retries. Missing final usage is charged at the
+attempt cap; an unreadable ledger stops dispatch. These are model-price/token
+estimates, not an invoice-level billing guarantee.
+
+A clean window that stopped for time, batch count or budget can continue on a
+later tick, including a tail below the initial backlog threshold. Continuation
+requires a fresh before/after decrease and processed pages, with no failed,
+held, truncated, or pending-write items. One unfinished job blocks overlapping
+work for that source. Numbered UTC-day idempotency keys survive restarts;
+`autopilot.auto_drain.max_windows_per_source_per_day` (default 6) also bounds
+zero-cost work. Automatic jobs make one attempt: errors stop that source's
+automatic windows for the day instead of starting unreserved retries. Setting
+the window limit to 1 retains one automatic window per source per day.
+
+A structural refusal before model work uses no allowance. Autopilot also skips
+sources whose writer preflight would refuse, and alternates checkout-backed and
+connector sources. Automatic reservations require priceable chat and embedding
+routes: an unknown price refuses model work and reports `no_pricing` guidance.
+Register the price with `gbrain pricing set` (see
+[registering a model price](#registering-a-model-price)). Manual drains retain
+their existing default-cap policy; an explicit cap always requires pricing.
+
+Drain receipts retain source, initial and final eligible backlog, processed page
+and transcript counts, zero-yield completions, failure/held/pending/truncated
+dispositions, and estimated spend on all stops. A hard-stop remaining count is
+marked stale. Partial failures are `status: partial`, and the CLI does not exit
+successfully just because failed pages left the eligible backlog.
 
 Connector pages are extracted by default. Gmail threads (`email`) and
 Calendar events (`meeting`) from a Google or GitHub connector source go

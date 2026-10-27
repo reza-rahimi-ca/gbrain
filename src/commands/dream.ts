@@ -666,15 +666,15 @@ async function runDrain(
   }
   const { drainBudgetNotice, usd } = await import('../core/cycle/extract-atoms-budget-notice.ts');
   const budgetNotice = result.stopped === 'budget' ? drainBudgetNotice(result) : null;
+  const done = result.stopped === 'drained' && result.remaining === 0 && result.status === 'ok' && result.failure_count === 0;
   if (opts.json) {
-    const done = result.stopped === 'drained' && result.remaining === 0;
     await writeJsonDocument(JSON.stringify(done ? result : { ...result, resume_command: drainCommand(opts),
       ...(budgetNotice ? { notices: [budgetNotice] } : {}) }, null, 2));
   } else {
     console.log(`[drain] extracted ${result.extracted} atom(s) across ${result.batches} batch(es); ${result.remaining ?? '?'} remaining (stopped: ${result.stopped})`);
   }
   // null remaining = the final count query failed; do not report success.
-  if (result.stopped === 'drained' && result.remaining === 0) return;
+  if (done) return;
   process.stderr.write(budgetNotice
     ? `[drain] stopped: budget; spent ${usd(result.spent_usd)} of the ${usd(result.budget_usd)} per-run cap (cycle.extract_atoms.budget_usd); ` +
       `${result.remaining ?? '?'} page(s) remaining. Rerun: ${drainCommand(opts)}, or raise the cap: gbrain config set cycle.extract_atoms.budget_usd <usd>\n`

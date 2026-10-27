@@ -41,7 +41,12 @@ export function makeExtractAtomsDrainHandler(engine: BrainEngine): MinionHandler
         brainDir: repoPath,
         signal: job.signal,
         deadlineAtMs,
+        budgetUsd: typeof job.data.budgetUsd === 'number' ? job.data.budgetUsd : undefined,
+        onBatch: (progress) => job.updateProgress({ phase: 'extract_atoms', source_id: sourceId ?? 'default', ...progress }),
       });
+      // Keep complete diagnostics even when the handler must throw and the
+      // queue stores error_text instead of a successful result.
+      if (!job.signal.aborted && !pastDeadline()) await job.updateProgress(result);
       const counts = `batches=${result.batches}, extracted=${result.extracted}, remaining=${result.remaining ?? '?'}`;
       if (result.stopped === 'deadline') {
         throw new UnrecoverableError(`extract-atoms-drain: stopped at the job deadline (${counts})`);
@@ -66,7 +71,8 @@ export function makeExtractAtomsDrainHandler(engine: BrainEngine): MinionHandler
         throw new UnrecoverableError(formatDrainProviderFailure(result, { final: true }));
       }
       if (result.status === 'provider_failure') {
-        throw new Error(formatDrainProviderFailure(result));
+        // The worker owns retry eligibility; automatic windows have one attempt.
+        throw new Error(formatDrainProviderFailure(result, { final: true }));
       }
       return result;
     } catch (e) {

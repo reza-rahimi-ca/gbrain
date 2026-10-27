@@ -2609,7 +2609,7 @@ export async function expand(query: string): Promise<string[]> {
       recordExpansionUsage(result.usage, true);
       const parsed = ExpansionSchema.safeParse(result.object);
       expansions = parsed.success ? parsed.data.queries : [];
-    } else if (recipeSupportsStructuredOutputs(recipe) && !_structuredOutputRejectedRecipes.has(recipe.id)) {
+    } else if (recipeSupportsStructuredOutputs(recipe) && (recipe.id === 'openrouter' || !_structuredOutputRejectedRecipes.has(recipe.id))) {
       // openai-compatible backend that honors strict json_schema: request the
       // schema (strict validation), and fall back to the text path if it is
       // rejected at call time so a mis-declared capability never drops expansion.
@@ -2636,6 +2636,7 @@ export async function expand(query: string): Promise<string[]> {
         recordExpansionFailure(err, true);
         // Adversarial F5: don't re-pay this attempt on every call — the
         // capability mis-declaration is stable for the process lifetime.
+        if (recipe.id === 'openrouter') throw err; // Never downgrade a routed schema or poison other routed models.
         _structuredOutputRejectedRecipes.add(recipe.id);
         expansions = await viaText(false);
       }
@@ -3735,7 +3736,7 @@ async function chatAdmitted(opts: ChatOpts, admitted: {
   const output = opts.responseSchema
     && recipe.implementation === 'openai-compatible'
     && recipeSupportsStructuredOutputs(recipe)
-    && !_structuredOutputRejectedRecipes.has(recipe.id)
+    && (recipe.id === 'openrouter' || !_structuredOutputRejectedRecipes.has(recipe.id))
     ? jsonSchemaOutput(opts.responseSchema)
     : undefined;
 
@@ -3760,7 +3761,7 @@ async function chatAdmitted(opts: ChatOpts, admitted: {
     try {
       result = await generate(output);
     } catch (err) {
-      if (!output || isAIInvocationPolicyError(err) || !isStructuredOutputRejection(err)) throw err;
+      if (!output || recipe.id === 'openrouter' || isAIInvocationPolicyError(err) || !isStructuredOutputRejection(err)) throw err;
       _structuredOutputRejectedRecipes.add(recipe.id);
       console.warn(
         `[ai.gateway] ${recipe.id} rejected response_format json_schema; retrying without a schema ` +

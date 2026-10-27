@@ -66,7 +66,9 @@ async function findFreePort(): Promise<number> {
 }
 
 describe('atom extraction structured output (#5627)', () => {
-  test('sends an object schema on the wire and persists a grounded atom', async () => {
+  // Existing coverage exercised only Ollama. The router arm catches a dropped
+  // schema or missing endpoint constraint through the real SDK wire serializer.
+  test.each([MODEL, 'openrouter:z-ai/glm-5.3-flash'])('sends an object schema via %s and persists a grounded atom', async (model) => {
     const requests: any[] = [];
     // This local protocol fixture exercises SDK serialization, not live decoding.
     // Bun 1.3.12 on macOS rejects port 0, so probe a free port with node:net.
@@ -82,13 +84,17 @@ describe('atom extraction structured output (#5627)', () => {
     let outcome;
     try {
       __setGenerateTextTransportForTests(null);
-      configureGateway({ chat_model: MODEL, env: {}, base_urls: { ollama: `http://127.0.0.1:${server.port}/v1` } });
+      const provider = model.split(':')[0];
+      configureGateway({ chat_model: model, env: { OPENROUTER_API_KEY: 'synthetic-key' }, base_urls: { [provider]: `http://127.0.0.1:${server.port}/v1` } });
+      await engine.setConfig('models.dream.extract_atoms', model);
       outcome = await extract();
     } finally {
       await server.stop(true);
     }
     expect(requests).toHaveLength(1);
     expect(requests[0].response_format?.type).toBe('json_schema');
+    expect(requests[0].response_format?.json_schema.strict).toBe(true);
+    if (model.startsWith('openrouter:')) expect(requests[0].provider?.require_parameters).toBe(true);
     const format = requests[0].response_format.json_schema;
     expect(format.schema.type).toBe('object');
     expect(format.schema.required).toEqual(['atoms']);
@@ -169,5 +175,24 @@ describe('atom extraction structured output (#5627)', () => {
     expect(second.details?.failures).toEqual([]);
     expect(calls).toHaveLength(3);
     expect(calls[2].output).toBeUndefined();
+  });
+
+  test('OpenRouter schema rejection never retries schemaless or disables schemas for another routed model', async () => {
+    configureGateway({ env: { OPENROUTER_API_KEY: 'synthetic-key' } });
+    await engine.setConfig('models.dream.extract_atoms', 'openrouter:z-ai/glm-5.3-flash');
+    __setGenerateTextTransportForTests(async (args: any) => {
+      calls.push(args);
+      throw Object.assign(new Error('response_format json_schema unsupported'), { name: 'AI_APICallError', statusCode: 400 });
+    });
+    const first = await extract();
+    expect(first.details?.failures).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].output).toBeDefined();
+    await engine.setConfig('models.dream.extract_atoms', 'openrouter:openai/gpt-5.2');
+    respond('{"atoms":[]}');
+    const second = await extract('b');
+    expect(second.details?.failures).toEqual([]);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].output).toBeDefined();
   });
 });

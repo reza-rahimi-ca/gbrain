@@ -52,6 +52,10 @@ function baseResult(overrides: Partial<ExtractAtomsDrainResult>): ExtractAtomsDr
   return {
     phase: 'extract_atoms',
     status: 'ok',
+    initial_remaining: 1, remaining_is_fresh: true, pages_processed: 1,
+    transcripts_processed: 0, zero_yield: 0, held_failed: 0, write_pending: 0,
+    malformed_outputs: 0, stopped_outputs: 0, tombstoned_for_failures: 0,
+    spent_usd: 0.01, budget_usd: 0.3,
     extracted: 1,
     skipped: 0,
     remaining: 0, // fully drained → dream exits 0 (no process.exit call)
@@ -108,7 +112,7 @@ describe('dream --drain failure summary (#4730)', () => {
 
     const r = await runDrainCaptured([]);
     expect(drainCalls).toHaveLength(1);
-    expect(r.exitCode).toBeUndefined();
+    expect(r.exitCode).toBe(11); // Failed pages leaving eligibility are not successful completion.
     expect(r.stderr).toContain('[drain] 3 item failure(s) (2 detailed, 1 beyond the record cap); last error: writings/b: bad json');
     expect(r.stderr).toContain('beyond the record cap');
     // Data stream stays clean of the diagnostic line.
@@ -239,6 +243,33 @@ describe('dream --drain stop contract (#5809)', () => {
 
 
 describe('dream --drain budget stop (#6425)', () => {
+  // /ship Step 7 coverage extension (G4).
+  // Value: protects=nonfailure partial drain receipts remain resumable even at zero eligible backlog and unknown spend renders safely;
+  // fails_when=CLI completion ignores partial status or formats nullable spend as a number;
+  // why_new=existing failure summary has failure_count > 0, so it cannot catch loss of the independent status guard;
+  // seam=none; no_claim=phase classification or managed publication (CLI consumes fixture receipts).
+  test('partial receipts with no item failures remain incomplete in human and JSON output', async () => {
+    for (const disposition of [{ held_failed: 1 }, { write_pending: 1 }, { input_truncated: 1 }, {}]) {
+      nextResult = baseResult({ status: 'partial', remaining: 0, stopped: 'drained', ...disposition });
+      const human = await runDrainCaptured([]);
+      expect(human.exitCode).toBe(11);
+      expect(human.stderr).toContain('Rerun: gbrain dream --drain --window 300');
+      const json = await runDrainCaptured(['--json']);
+      expect(json.exitCode).toBe(11);
+      expect(JSON.parse(json.stdout.join('\n'))).toMatchObject({ status: 'partial', failure_count: 0,
+        remaining: 0, resume_command: 'gbrain dream --drain --window 300', ...disposition });
+    }
+    nextResult = baseResult({ stopped: 'budget', remaining: 1, spent_usd: null, budget_usd: null });
+    const human = await runDrainCaptured([]);
+    expect(human.exitCode).toBe(11);
+    expect(human.stderr).toContain('spent $? of the $? per-run cap');
+    const json = await runDrainCaptured(['--json']);
+    expect(json.exitCode).toBe(11);
+    const payload = JSON.parse(json.stdout.join('\n'));
+    expect(payload).toMatchObject({ spent_usd: null, budget_usd: null, resume_command: 'gbrain dream --drain --window 300' });
+    expect(payload.notices[0].why).toContain('$? of $?');
+  });
+
   test('names the spend, the cap and the raise-cap command; --json carries a structured notice', async () => {
     nextResult = baseResult({ stopped: 'budget', remaining: 2, batches: 2, spent_usd: 0.0151, budget_usd: 0.03 });
     const human = await runDrainCaptured([]);

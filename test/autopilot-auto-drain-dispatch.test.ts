@@ -75,7 +75,7 @@ async function tick(now = DAY1): Promise<string> {
   try {
     await withEnv({ GBRAIN_HOME: home }, () => submitAutoDrains(engine, queue, { timeoutMs: 60_000, jsonMode: true, now: () => now }));
   } finally { process.stderr.write = write; }
-  await engine.executeRaw("UPDATE minion_jobs SET created_at=$1::timestamptz WHERE idempotency_key LIKE '%:' || $2",
+  await engine.executeRaw("UPDATE minion_jobs SET created_at=$1::timestamptz WHERE idempotency_key LIKE '%:' || $2 || '%'",
     [new Date(now).toISOString(), new Date(now).toISOString().slice(0, 10)]);
   return stderr;
 }
@@ -111,6 +111,7 @@ test('one slot left with a git and a connector source: the git source is submitt
   await tick(DAY1);
   expect((await submitted()).map(j => j.source)).toEqual(['git-a']);
   expect(await engine.getConfig(AUTO_DRAIN_NEXT_KIND_KEY)).toBe('connector');
+  await engine.executeRaw("UPDATE minion_jobs SET status='completed', attempts_started=1");
   await tick(DAY2);
   expect((await submitted()).map(j => j.source)).toEqual(['git-a', 'gmail']);
   expect(await engine.getConfig(AUTO_DRAIN_NEXT_KIND_KEY)).toBe('checkout');
@@ -170,4 +171,98 @@ test('managed brain: a source whose writer preflight would refuse is skipped wit
   const skip = stderr.split('\n').filter(Boolean).map(line => JSON.parse(line)).find(e => e.event === 'auto_drain_source_skipped');
   expect(skip).toMatchObject({ source_id: 'git-unowned' });
   expect(skip.reason).toContain('requires the configured canonical owner');
+});
+
+// Scheduler-level continuation through the real queue. No existing coverage
+// completed a partial window and ticked again; these fail under daily-only dedup.
+const cleanWindow = {
+  source_id: 'git-a', status: 'ok', stopped: 'window', initial_remaining: 5, remaining: 2,
+  remaining_is_fresh: true, pages_processed: 3, failure_count: 0, held_failed: 0,
+  write_pending: 0, input_truncated: 0, tombstoned_for_failures: 0, malformed_outputs: 0,
+  stopped_outputs: 0, spent_usd: 0.1, budget_usd: 0.3,
+};
+async function finishWindow(result: Record<string, unknown> = cleanWindow): Promise<void> {
+  await engine.executeRaw(`UPDATE minion_jobs SET status='completed', attempts_started=1,
+    result=$1::text::jsonb WHERE id=(SELECT max(id) FROM minion_jobs WHERE data->>'sourceId'='git-a')`,
+    [JSON.stringify(result)]);
+}
+
+test('clean partial windows continue once per tick, never overlap, and stop at the window bound', async () => {
+  await gitSource('git-a');
+  await engine.setConfig('autopilot.auto_drain.max_windows_per_source_per_day', '2');
+  await tick();
+  await tick();
+  expect(await submitted()).toHaveLength(1);
+  await finishWindow();
+  // Continuation drains the tail even when it is below the initial threshold.
+  await engine.setConfig('autopilot.auto_drain.threshold', '25');
+  await tick();
+  expect(await submitted()).toHaveLength(2);
+  const rows = await engine.executeRaw<{ idempotency_key: string; data: any; max_attempts: number }>('SELECT idempotency_key, data, max_attempts FROM minion_jobs ORDER BY id');
+  expect(rows[1].idempotency_key).toBe('autopilot-extract-atoms-drain:git-a:2026-09-20:2');
+  expect(rows[1].data.budgetUsd).toBe(0.3);
+  expect(rows[1].max_attempts).toBe(1);
+  await finishWindow();
+  await tick();
+  expect(await submitted()).toHaveLength(2);
+});
+
+test.each([
+  { failure_count: 1 }, { held_failed: 1 }, { write_pending: 1 }, { input_truncated: 1 },
+  { tombstoned_for_failures: 1 }, { remaining_is_fresh: false }, { pages_processed: 0 },
+  { remaining: 5 }, { spent_usd: null }, { status: 'partial' }, { stopped: 'no_progress' },
+])('does not continue an incomplete or failing receipt: %j', async (override) => {
+  await gitSource('git-a');
+  await tick();
+  await finishWindow({ ...cleanWindow, ...override });
+  await tick();
+  expect(await submitted()).toHaveLength(1);
+});
+
+test('cumulative spend plus the next reservation respects the daily cap', async () => {
+  await gitSource('git-a');
+  await engine.setConfig('autopilot.auto_drain.max_usd_per_day', '0.5');
+  await tick();
+  await finishWindow({ ...cleanWindow, spent_usd: 0.25 });
+  await tick();
+  expect(await submitted()).toHaveLength(1); // 0.25 spent + 0.30 reserved would exceed 0.50
+  await finishWindow({ ...cleanWindow, spent_usd: 0.1 });
+  await tick();
+  expect(await submitted()).toHaveLength(2);
+});
+
+test('configured attempt budgets and pending legacy retries are fully reserved', async () => {
+  await gitSource('git-a');
+  await gitSource('git-b');
+  await engine.setConfig('cycle.extract_atoms.budget_usd', '0.8');
+  await engine.setConfig('autopilot.auto_drain.max_usd_per_day', '1');
+  await tick();
+  expect(await submitted()).toHaveLength(1);
+  await reset();
+  await engine.setConfig('autopilot.auto_drain.threshold', '1');
+  await engine.setConfig('autopilot.auto_drain.max_usd_per_day', '0.9');
+  await gitSource('git-a');
+  await gitSource('git-b');
+  await priorJob('git-a', DAY1, { status: 'waiting', attempts: 0 });
+  await tick();
+  expect(await submitted()).toHaveLength(1); // three possible legacy attempts consume the allowance
+});
+
+test('an unfinished window from yesterday prevents an overlapping window today', async () => {
+  await gitSource('git-a');
+  await priorJob('git-a', DAY1, { status: 'waiting', attempts: 0 });
+  await tick(DAY2);
+  expect(await submitted()).toHaveLength(1);
+});
+
+test('an unreadable spend ledger refuses dispatch instead of assuming zero spend', async () => {
+  await gitSource('git-a');
+  const failedLedger = new Proxy(engine, { get(target, key) {
+    if (key === 'executeRaw') return async () => { throw new Error('ledger unavailable'); };
+    const value = Reflect.get(target, key);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  await expect(submitAutoDrains(failedLedger, queue, { timeoutMs: 60_000, jsonMode: true, now: () => DAY1 }))
+    .rejects.toThrow('ledger unavailable');
+  expect(await submitted()).toEqual([]);
 });

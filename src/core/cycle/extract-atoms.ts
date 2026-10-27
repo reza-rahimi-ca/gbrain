@@ -246,7 +246,7 @@ export interface ExtractAtomsOpts {
    */
   stopSignal?: AbortSignal;
   /** #5856/#5854: one drain attempt's state shared by its batches: the first batch's BudgetTracker (one cap per attempt) and one publish wait. */
-  attempt?: { budgetTracker?: BudgetTracker; writeWait?: MaintenanceWriteWait };
+  attempt?: { budgetTracker?: BudgetTracker; writeWait?: MaintenanceWriteWait; budgetUsd?: number };
 }
 
 /**
@@ -889,6 +889,7 @@ export async function runPhaseExtractAtoms(
   let totalAtomsExtracted = 0;
   let transcriptsProcessed = 0;
   let pagesProcessed = 0;
+  let zeroYield = 0;
   let transcriptsSkipped = 0;
   let pagesSkipped = 0;
   const failures: Array<{ source: string; error: string }> = [];
@@ -938,6 +939,11 @@ export async function runPhaseExtractAtoms(
   // the extraction chat model AND the embed route importFromContent calls.
   // A default cap is dropped for an unpriced route (warn and run); a cap the
   // operator set refuses the run with no_pricing guidance (cost-gate module).
+  if (opts.attempt?.budgetUsd !== undefined) {
+    if (!Number.isFinite(opts.attempt.budgetUsd) || opts.attempt.budgetUsd <= 0) throw new Error('Atom drain budget must be finite and positive.');
+    budgetCap = Math.min(budgetCap, opts.attempt.budgetUsd);
+    explicitBudget = true; // Automatic reservations must never fall back to unpriced, uncapped work.
+  }
   const pricingOverrides = await loadPricingOverrides(engine);
   const costGate = resolveExtractAtomsCostGate(extractModel, resolveEmbedModelForCostGate(), pricingOverrides, { explicitBudget });
   const refused = await settleExtractAtomsCostGate(engine, sourceId, costGate, { budgetCap, extractModel, dryRun: opts.dryRun ?? false });
@@ -1067,6 +1073,22 @@ export async function runPhaseExtractAtoms(
     }
   }
 
+  async function completeZeroYield(item: WorkItem, input: ExtractAtomsInput, origin: AtomOrigin | null): Promise<void> {
+    let completed = !input.truncated;
+    if (!opts.dryRun) {
+      const published = managed && origin ? await publishManagedAtoms(engine, managed, origin, []) : [];
+      if (published.some(receipt => receipt.state !== 'committed')) { writesPending++; completed = false; }
+      writeRequests.push(...published);
+      if (!origin && input.truncated) await recordPartialDisposition(engine, sourceId, item, maxInputChars);
+      else if (!origin && item.kind === 'page') await stampAtomsScanHash(item);
+      else if (!origin && item.kind === 'transcript') await stampTranscriptTombstone(engine, sourceId, item.filePath, item.contentHash);
+      await commitAtomsWatermark(item, input, published);
+    }
+    if (item.kind === 'transcript') transcriptsProcessed++;
+    else pagesProcessed++;
+    if (completed) zeroYield++;
+  }
+
   let stoppedEarly = false;
   await withBudgetTracker(budgetTracker, async () => {
   for (const item of work) {
@@ -1144,16 +1166,7 @@ export async function runPhaseExtractAtoms(
         // re-entered the pool and re-spent budget on every cycle forever. The
         // row is (source_id, file_path, content_hash)-keyed, so editing the
         // file re-eligibilizes it — which is what makes the permanence safe.
-        if (!opts.dryRun) {
-          const published = managed && origin ? await publishManagedAtoms(engine, managed, origin, []) : [];
-          writeRequests.push(...published);
-          if (!origin && truncated) await recordPartialDisposition(engine, sourceId, item, maxInputChars);
-          else if (!origin && item.kind === 'page') await stampAtomsScanHash(item);
-          else if (!origin && item.kind === 'transcript') await stampTranscriptTombstone(engine, sourceId, item.filePath, item.contentHash);
-          await commitAtomsWatermark(item, input, published);
-        }
-        if (item.kind === 'transcript') transcriptsProcessed++;
-        else pagesProcessed++;
+        await completeZeroYield(item, input, origin);
         continue;
       }
 
@@ -1435,6 +1448,7 @@ export async function runPhaseExtractAtoms(
       transcripts_total: transcripts.length,
       transcripts_skipped_budget: transcriptsSkipped,
       pages_processed: pagesProcessed,
+      zero_yield: zeroYield,
       pages_total: pages.length,
       pages_skipped_budget: pagesSkipped,
       duplicates_skipped: duplicatesSkipped,

@@ -215,6 +215,11 @@ describe('recipe: openrouter', () => {
     expect(r.compat?.fetch).toBe(openrouterCompatFetch);
   });
 
+  // /ship Step 7 coverage extension (G2).
+  // Value: protects=schema enforcement preserves provider privacy/routing settings and composes with prompt caching;
+  // fails_when=provider siblings or cache breakpoints are dropped, or a rewritten body retains a stale content-length;
+  // why_new=existing cache cases have no response schema or provider routing policy;
+  // seam=none; no_claim=live endpoint enforcement (the outgoing fetch is captured).
   test('15. fetch shim rewrites system content-block cache_control for Claude routes and always strips the marker header', async () => {
     const originalFetch = globalThis.fetch;
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
@@ -257,6 +262,32 @@ describe('recipe: openrouter', () => {
       await post('anthropic/claude-sonnet-4.6', false);
       const noMarker = JSON.parse(calls[2].init!.body as string);
       expect(noMarker.messages[0]).toEqual({ role: 'system', content: 'stable system prompt' });
+
+      for (const cache of [false, true]) {
+        for (const type of ['json_schema', 'json_object']) {
+          const provider = { data_collection: 'deny', allow_fallbacks: false, order: ['synthetic-provider'], require_parameters: false };
+          const responseFormat = type === 'json_schema'
+            ? { type, json_schema: { name: 'result', strict: true, schema: { type: 'object', properties: {}, additionalProperties: false } } }
+            : { type };
+          const body = JSON.stringify({ model: 'anthropic/claude-sonnet-4.6', provider, response_format: responseFormat,
+            messages: [{ role: 'system', content: 'stable system prompt' }, { role: 'user', content: 'hello' }] });
+          const headers = { 'content-length': String(Buffer.byteLength(body)), 'x-request-id': 'synthetic-request',
+            ...(cache ? { [OPENROUTER_CACHE_HEADER]: '1' } : {}) };
+          await openrouterCompatFetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers, body });
+          const sent = calls.at(-1)!.init!;
+          const payload = JSON.parse(sent.body as string);
+          const sentHeaders = new Headers(sent.headers);
+          expect(payload.provider).toEqual({ ...provider, require_parameters: type === 'json_schema' });
+          expect(payload.response_format).toEqual(responseFormat);
+          expect(payload.messages[0].content).toEqual(cache
+            ? [{ type: 'text', text: 'stable system prompt', cache_control: { type: 'ephemeral' } }]
+            : 'stable system prompt');
+          expect(payload.messages[1]).toEqual({ role: 'user', content: 'hello' });
+          expect(sentHeaders.get('x-request-id')).toBe('synthetic-request');
+          expect(sentHeaders.has(OPENROUTER_CACHE_HEADER)).toBe(false);
+          expect(sentHeaders.get('content-length')).toBe(cache || type === 'json_schema' ? null : String(Buffer.byteLength(body)));
+        }
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }

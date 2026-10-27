@@ -26,6 +26,28 @@ function seq(values: Array<number | null>): () => Promise<number | null> {
 const passThroughLock: ExtractAtomsDrainDeps['withLock'] = (work) => work(new AbortController().signal);
 
 describe('runExtractAtomsDrain (issue #1678)', () => {
+  // Protect the durable receipt used by monitors and continuation. Old tests
+  // asserted atom counts, not page outcomes or spend on non-budget stops.
+  it('preserves page dispositions and cumulative spend on a timed partial run', async () => {
+    let clock = 0;
+    const progress: unknown[] = [];
+    const result = await runExtractAtomsDrain({
+      withLock: passThroughLock, now: () => clock,
+      countRemaining: async () => clock ? 4 : 8,
+      runBatch: async () => {
+        clock = 200;
+        return { extracted: 7, skipped: 0, failureCount: 1,
+          budget: { spentUsd: 0.12, capUsd: 0.3 },
+          progress: { pages_processed: 3, zero_yield: 1, held_failed: 1, tombstoned_for_failures: 1 } };
+      },
+      onBatch: async (info) => { progress.push(info); },
+    }, { windowMs: 100 });
+    expect(result).toMatchObject({ status: 'partial', stopped: 'window', initial_remaining: 8,
+      remaining: 4, remaining_is_fresh: true, pages_processed: 3, zero_yield: 1,
+      held_failed: 1, tombstoned_for_failures: 1, failure_count: 1, spent_usd: 0.12, budget_usd: 0.3 });
+    expect(progress).toEqual([{ batch: 1, extracted: 7, before: 8, remaining: 4 }]);
+  });
+
   it('drains to empty and reports stopped=drained', async () => {
     let batches = 0;
     const result = await runExtractAtomsDrain(

@@ -4,9 +4,9 @@
  */
 import { cliRenderContext, renderNotice, type RenderedNotice } from '../agent-output.ts';
 
-export const usd = (n: number | undefined): string => n === undefined ? '$?' : `$${Number(n.toFixed(4))}`;
+export const usd = (n: number | null | undefined): string => n == null ? '$?' : `$${Number(n.toFixed(4))}`;
 
-export function drainBudgetNotice(result: { spent_usd?: number; budget_usd?: number; remaining: number | null }): RenderedNotice {
+export function drainBudgetNotice(result: { spent_usd?: number | null; budget_usd?: number | null; remaining: number | null }): RenderedNotice {
   return renderNotice({
     code: 'atom_drain_budget', kind: 'info',
     why: `The atom drain stopped at its per-run spending cap: it spent ${usd(result.spent_usd)} of ${usd(result.budget_usd)} (cycle.extract_atoms.budget_usd) and ${result.remaining ?? 'an unknown number of'} page(s) still need atoms. Rerun the drain to continue under the same cap, or raise the cap.`,
