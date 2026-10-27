@@ -184,6 +184,8 @@ d('take persistence routing', () => {
   }));
 
   test('an unclaimed configured root refuses before admission in the handler and MCP envelope', () => inBrain(async () => {
+    // Opt into refusal instead of the fork's unmanaged Postgres compatibility lane.
+    await engine.setConfig('persistence.unbound_write', 'refuse');
     const before = await snapshot(SLUG.unclaimed, UNCLAIMED_SOURCE);
     const params = { request_id: randomUUID(), slug: SLUG.unclaimed, claim: 'Must not land', kind: 'take', holder: 'world' };
     const error = await expectOpError(call('takes_add', params, ctxOf({ sourceId: UNCLAIMED_SOURCE })));

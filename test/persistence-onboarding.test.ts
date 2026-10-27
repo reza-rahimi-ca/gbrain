@@ -27,6 +27,8 @@ for (const kind of testBackends()) describe(`deliberate onboarding (${kind})`, (
     await makeGitFixture(root);
     if (kind === 'postgres') ({ engine, close } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
     else { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }
+    // Exercise deliberate refusal, not the fork's unmanaged Postgres compatibility lane.
+    await engine.setConfig('persistence.unbound_write', 'refuse');
   }, 120_000);
   afterAll(async () => { await disposePersistenceConsumer(engine); if (close) await close(); else await engine.disconnect(); rmSync(home, { recursive: true, force: true }); });
   test('read-only preflight identifies both blocked states and explicit onboarding restores writes and sync', () => withEnv({ GBRAIN_HOME: home, GBRAIN_SOURCE: undefined }, async () => {

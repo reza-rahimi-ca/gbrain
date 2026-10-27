@@ -21,6 +21,8 @@ beforeAll(async () => {
   root = join(home, 'canonical'); mkdirSync(root);
   const isolated = await isolatedPersistencePostgres(process.env.DATABASE_URL);
   engine = isolated.engine; close = isolated.close;
+  // This fixture tests explicit refusal and reviewed administration.
+  await engine.setConfig('persistence.unbound_write', 'refuse');
   const [database] = await engine.executeRaw<{ name: string }>('SELECT current_database() AS name');
   const url = new URL(process.env.DATABASE_URL); url.pathname = `/${database.name}`;
   mkdirSync(join(home, '.gbrain'));
