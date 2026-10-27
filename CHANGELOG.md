@@ -10,6 +10,25 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.244.0] - 2026-10-27
+
+### Fixed
+
+- **Automatic atom-extraction drain now continues reliably across restarts.** Added bounded continuation windows (up to 6 per source per day), same-source overlap prevention, and conservative spending reservations. Failures stop same-day automatic continuation. Existing dollar caps are unchanged.
+- **OpenRouter structured output no longer silently degrades.** JSON schemas are transmitted to schema-capable routes; a rejected schema fails the call instead of poisoning other model routes.
+- **Output token cap is configurable.** `cycle.extract_atoms.max_output_tokens` is now a first-class setting (default 4096, settable to 8192 or higher).
+
+### To take advantage of v0.60.244.0
+
+`gbrain upgrade` should handle this automatically. If it didn't:
+
+1. Run: `gbrain apply-migrations --yes`
+2. Restart any running `gbrain serve`, `gbrain-autopilot.service`, and OpenClaw gateway consumers.
+3. Verify: `gbrain doctor --only extract_atoms_backlog --json`
+
+No schema migration is required.
+
+
 ## [0.60.243.0] - 2026-10-15
 
 **Entity rows now point at the records behind an account.** Every found `entity names` row (and each identity sibling) carries `referenced_by_count` and a `next` to its full card, so an agent that resolved a batch of names knows which ones have pages to read and how to open them. With `entity.record_types` set (off by default), the rows, the full card and `context_pack` also list the referring contracts, amendments or other record types you enroll: newest page date first, each with its page date labeled as a page date, its `status`, the record it amends (with the terms-start date when the link records one) and what it replaces, bounded per page and per call, with continuations that return exactly the rest. The order never claims which record governs. A late or failed read is marked `references_unavailable` with a degraded notice, never shown as an empty list.
