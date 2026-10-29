@@ -18,6 +18,14 @@
 # No auto-install by design: an MCP server start must never run a network
 # install. On a miss this exits 127 with the recovery path on stderr; the
 # bundled `setup` skill walks the install interactively.
+#
+# GBRAIN_PLUGIN_REMOTE_URL (thin-client mode): when set and argv[0] is
+# `serve`, run src/mcp/stdio-relay.ts instead of a local server, forwarding
+# stdio to one shared `gbrain serve --http` so each harness session does not
+# start its own full persistence consumer. The bearer token is read from
+# GBRAIN_PLUGIN_REMOTE_TOKEN_FILE (default ~/.gbrain/serve/plugin-client-token).
+# If the shared server's /health probe fails, fall back to the local server
+# (then the only consumer) unless GBRAIN_PLUGIN_REMOTE_FALLBACK=fail.
 
 set -eu
 
@@ -60,6 +68,35 @@ resolve_bin() {
   echo "  or set GBRAIN_BIN to an absolute gbrain binary path." >&2
   exit 127
 }
+
+resolve_bun() {
+  if [ -x "${HOME:-}/.bun/bin/bun" ]; then
+    printf '%s' "$HOME/.bun/bin/bun"
+    return
+  fi
+  command -v bun 2>/dev/null || true
+}
+
+if [ -n "${GBRAIN_PLUGIN_REMOTE_URL:-}" ] && [ "${1:-}" = "serve" ]; then
+  plugin_root="$(cd "$(dirname "$0")/.." && pwd)"
+  relay="$plugin_root/src/mcp/stdio-relay.ts"
+  BUN="$(resolve_bun)"
+  if [ -z "$BUN" ] || [ ! -f "$relay" ] || [ ! -d "$plugin_root/node_modules/@modelcontextprotocol/sdk" ]; then
+    echo "gbrain-launcher: relay unavailable (needs bun, $relay and its node_modules)" >&2
+  elif "$BUN" "$relay" --probe; then
+    if [ -n "${GBRAIN_SURFACE:-}" ]; then
+      echo "gbrain-launcher: GBRAIN_SURFACE is ignored in relay mode; the shared server's grant sets the surface" >&2
+    fi
+    echo "gbrain-launcher: relaying to $GBRAIN_PLUGIN_REMOTE_URL" >&2
+    exec "$BUN" "$relay"
+  else
+    echo "gbrain-launcher: shared server $GBRAIN_PLUGIN_REMOTE_URL is unavailable" >&2
+  fi
+  if [ "${GBRAIN_PLUGIN_REMOTE_FALLBACK:-local}" = "fail" ]; then
+    exit 75
+  fi
+  echo "gbrain-launcher: falling back to a local gbrain serve" >&2
+fi
 
 BIN="$(resolve_bin)"
 echo "gbrain-launcher: using $BIN" >&2
